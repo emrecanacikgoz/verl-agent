@@ -24,10 +24,10 @@ set -x
 ENGINE=${1:-vllm}
 shift $# # consume positional args so $@ doesn't leak into hydra
 export VLLM_ATTENTION_BACKEND=XFORMERS
-export HF_HOME=${HF_HOME}
-export WANDB_API_KEY=${WANDB_API_KEY}
-export WANDB_DIR=${WANDB_DIR}
-export CUDA_VISIBLE_DEVICES=${CUDA_VISIBLE_DEVICES}
+export HF_HOME=${HF_HOME:-}
+export WANDB_API_KEY=${WANDB_API_KEY:-}
+export WANDB_DIR=${WANDB_DIR:-}
+[[ -n "${CUDA_VISIBLE_DEVICES:-}" ]] && export CUDA_VISIBLE_DEVICES=${CUDA_VISIBLE_DEVICES}
 
 # ─────────────────────────────────────────────────────────────────────────────
 # Configuration
