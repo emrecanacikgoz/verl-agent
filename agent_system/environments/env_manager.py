@@ -599,6 +599,184 @@ class AppWorldEnvironmentManager(EnvironmentManagerBase):
                 postprocess_text_obs.append(obs)
         return postprocess_text_obs
 
+class Tau2BenchSolverEnvironmentManager(EnvironmentManagerBase):
+    """Environment manager for tau2-bench solver (multi-turn tool-calling agent)."""
+
+    def __init__(self, envs, projection_f, config):
+        self.memory = SimpleMemory()
+        super().__init__(envs, projection_f, config)
+
+    def reset(self, kwargs) -> Tuple[Dict[str, Any], List[Dict]]:
+        obs, infos = self.envs.reset(kwargs=kwargs)
+        self.tasks = obs  # first user messages
+        self.memory.reset(batch_size=len(obs))
+
+        # Build system prompt info from first worker's domain info
+        self._build_system_info(infos)
+
+        observations = {
+            "text": self.build_text_obs(obs, init=True),
+            "image": None,
+            "anchor": obs.copy(),
+        }
+        return observations, infos
+
+    def _build_system_info(self, infos):
+        """Cache system prompt components from worker info."""
+        # These are available from the worker infos on first reset
+        self.domains = [info.get("domain", "unknown") for info in infos]
+
+    def step(self, text_actions: List[str]):
+        # Parse actions using projection
+        parsed_actions, valids = self.projection_f(text_actions)
+
+        # Step environments with parsed actions
+        next_obs, rewards, dones, infos = self.envs.step(parsed_actions)
+
+        # Store in memory
+        self.memory.store({
+            "action": text_actions,
+            "observation": next_obs,
+        })
+
+        next_observations = {
+            "text": self.build_text_obs(next_obs),
+            "image": None,
+            "anchor": next_obs.copy(),
+        }
+
+        for i, info in enumerate(infos):
+            if "is_action_valid" not in info:
+                info["is_action_valid"] = to_numpy(valids[i])
+            else:
+                info["is_action_valid"] = to_numpy(info["is_action_valid"])
+
+        rewards = to_numpy(rewards)
+        dones = to_numpy(dones)
+
+        return next_observations, rewards, dones, infos
+
+    def build_text_obs(
+        self, text_obs: List[str], init: bool = False
+    ) -> List[str]:
+        postprocess_text_obs: List[str] = []
+
+        if not init and self.config.env.history_length > 0:
+            memory_ctx, valid_lens = self.memory.fetch(
+                self.config.env.history_length,
+                obs_key="observation",
+                action_key="action",
+            )
+
+        # Get solver system prompt components from env workers
+        workers = self.envs.workers if hasattr(self.envs, 'workers') else []
+
+        for i in range(len(text_obs)):
+            # Build system prompt with policy and tools
+            if workers and i < len(workers) and workers[i].policy:
+                import json as _json
+                system_prompt = TAU2BENCH_SOLVER_SYSTEM.format(
+                    domain=workers[i].domain if hasattr(workers[i], 'domain') else 'unknown',
+                    policy=workers[i].policy[:2000],  # Truncate long policies
+                    tool_schemas=_json.dumps(workers[i].tool_schemas[:20], indent=1)[:3000],
+                )
+            else:
+                system_prompt = TAU2BENCH_SOLVER_SYSTEM.format(
+                    domain='unknown', policy='N/A', tool_schemas='[]'
+                )
+
+            if init or self.config.env.history_length <= 0:
+                obs_i = TAU2BENCH_SOLVER_TEMPLATE_NO_HIS.format(
+                    system_prompt=system_prompt,
+                    current_observation=text_obs[i],
+                )
+            else:
+                obs_i = TAU2BENCH_SOLVER_TEMPLATE.format(
+                    system_prompt=system_prompt,
+                    step_count=len(self.memory[i]),
+                    history_length=valid_lens[i],
+                    action_history=memory_ctx[i],
+                    current_observation=text_obs[i],
+                )
+            postprocess_text_obs.append(obs_i)
+
+        return postprocess_text_obs
+
+    def _process_batch(self, batch_idx, total_batch_list, total_infos, success):
+        for i in reversed(range(len(total_batch_list[batch_idx]))):
+            batch_item = total_batch_list[batch_idx][i]
+            if batch_item['active_masks']:
+                info = total_infos[batch_idx][i]
+                won_value = float(info.get('won', 0.0))
+                success['success_rate'].append(won_value)
+
+                domain = info.get("domain", "unknown")
+                success[f"{domain}_success_rate"].append(won_value)
+                return
+
+
+class Tau2BenchChallengerEnvironmentManager(EnvironmentManagerBase):
+    """Environment manager for tau2-bench challenger (generates task specs)."""
+
+    def __init__(self, envs, projection_f, config):
+        super().__init__(envs, projection_f, config)
+
+    def reset(self, kwargs) -> Tuple[Dict[str, Any], List[Dict]]:
+        obs, infos = self.envs.reset(kwargs=kwargs)
+
+        observations = {
+            "text": self.build_text_obs(obs, init=True),
+            "image": None,
+            "anchor": obs.copy(),
+        }
+        return observations, infos
+
+    def step(self, text_actions: List[str]):
+        parsed_actions, valids = self.projection_f(text_actions)
+        next_obs, rewards, dones, infos = self.envs.step(parsed_actions)
+
+        next_observations = {
+            "text": self.build_text_obs(next_obs),
+            "image": None,
+            "anchor": next_obs.copy(),
+        }
+
+        for i, info in enumerate(infos):
+            if "is_action_valid" not in info:
+                info["is_action_valid"] = to_numpy(valids[i])
+            else:
+                info["is_action_valid"] = to_numpy(info["is_action_valid"])
+
+        rewards = to_numpy(rewards)
+        dones = to_numpy(dones)
+
+        return next_observations, rewards, dones, infos
+
+    def build_text_obs(
+        self, text_obs: List[str], init: bool = False
+    ) -> List[str]:
+        postprocess_text_obs = []
+        for i in range(len(text_obs)):
+            if init:
+                obs = TAU2BENCH_CHALLENGER_TEMPLATE.format(
+                    system_prompt=TAU2BENCH_CHALLENGER_SYSTEM,
+                    domain_info=text_obs[i],
+                )
+            else:
+                obs = text_obs[i]  # After step, challenger is done
+            postprocess_text_obs.append(obs)
+        return postprocess_text_obs
+
+    def _process_batch(self, batch_idx, total_batch_list, total_infos, success):
+        for i in reversed(range(len(total_batch_list[batch_idx]))):
+            batch_item = total_batch_list[batch_idx][i]
+            if batch_item['active_masks']:
+                info = total_infos[batch_idx][i]
+                won_value = float(info.get('won', 0.0))
+                success['success_rate'].append(won_value)
+                return
+
+
 def make_envs(config):
     """
     Create enviroments 
@@ -693,6 +871,58 @@ def make_envs(config):
         projection_f = partial(appworld_projection)
         envs = AppWorldEnvironmentManager(_envs, projection_f, config)
         val_envs = AppWorldEnvironmentManager(_val_envs, projection_f, config)
+        return envs, val_envs
+    elif "tau2bench_solver" in config.env.env_name.lower():
+        from agent_system.environments.env_package.tau2bench import (
+            build_tau2bench_solver_envs,
+            solver_projection,
+        )
+        tau2_cfg = config.env.tau2bench
+        _envs = build_tau2bench_solver_envs(
+            domain=tau2_cfg.domain,
+            user_sim_url=tau2_cfg.user_sim_url,
+            user_sim_model=tau2_cfg.user_sim_model,
+            seed=config.env.seed,
+            env_num=config.data.train_batch_size,
+            group_n=group_n,
+            is_train=True,
+        )
+        _val_envs = build_tau2bench_solver_envs(
+            domain=tau2_cfg.domain,
+            user_sim_url=tau2_cfg.user_sim_url,
+            user_sim_model=tau2_cfg.user_sim_model,
+            seed=config.env.seed + 1000,
+            env_num=config.data.val_batch_size,
+            group_n=1,
+            is_train=False,
+        )
+        projection_f = partial(solver_projection)
+        envs = Tau2BenchSolverEnvironmentManager(_envs, projection_f, config)
+        val_envs = Tau2BenchSolverEnvironmentManager(_val_envs, projection_f, config)
+        return envs, val_envs
+    elif "tau2bench_challenger" in config.env.env_name.lower():
+        from agent_system.environments.env_package.tau2bench import (
+            build_tau2bench_challenger_envs,
+            challenger_projection,
+        )
+        tau2_cfg = config.env.tau2bench
+        _envs = build_tau2bench_challenger_envs(
+            domain=tau2_cfg.domain,
+            seed=config.env.seed,
+            env_num=config.data.train_batch_size,
+            group_n=group_n,
+            is_train=True,
+        )
+        _val_envs = build_tau2bench_challenger_envs(
+            domain=tau2_cfg.domain,
+            seed=config.env.seed + 1000,
+            env_num=config.data.val_batch_size,
+            group_n=1,
+            is_train=False,
+        )
+        projection_f = partial(challenger_projection)
+        envs = Tau2BenchChallengerEnvironmentManager(_envs, projection_f, config)
+        val_envs = Tau2BenchChallengerEnvironmentManager(_val_envs, projection_f, config)
         return envs, val_envs
     else:
         print("Environment not supported")
