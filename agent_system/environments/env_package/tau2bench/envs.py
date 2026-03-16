@@ -337,8 +337,10 @@ class Tau2BenchSolverEnvs(gym.Env):
     def close(self):
         if getattr(self, "_closed", False):
             return
-        self._executor.shutdown(wait=True)
-        self._loop.close()
+        if hasattr(self, "_executor"):
+            self._executor.shutdown(wait=True)
+        if hasattr(self, "_loop"):
+            self._loop.close()
         self._closed = True
 
     def __del__(self):
@@ -402,8 +404,10 @@ class Tau2BenchChallengerEnvs(gym.Env):
     def close(self):
         if getattr(self, "_closed", False):
             return
-        self._executor.shutdown(wait=True)
-        self._loop.close()
+        if hasattr(self, "_executor"):
+            self._executor.shutdown(wait=True)
+        if hasattr(self, "_loop"):
+            self._loop.close()
         self._closed = True
 
     def __del__(self):
