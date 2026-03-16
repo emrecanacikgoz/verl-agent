@@ -314,3 +314,7 @@ env:
   webshop:
     use_small: True
     human_goals: False
+  tau2bench:
+    domain: retail
+    user_sim_url: "http://localhost:8000/v1"
+    user_sim_model: "Qwen/Qwen2.5-7B-Instruct"
