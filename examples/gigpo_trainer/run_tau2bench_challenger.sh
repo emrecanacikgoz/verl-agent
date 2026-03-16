@@ -16,6 +16,7 @@
 
 set -x
 ENGINE=${1:-vllm}
+shift $# # consume positional args so $@ doesn't leak into hydra
 export VLLM_ATTENTION_BACKEND=XFORMERS
 export HF_HOME=${HF_HOME}
 export WANDB_API_KEY=${WANDB_API_KEY}
