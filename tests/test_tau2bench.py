@@ -41,6 +41,7 @@ from agent_system.environments.env_package.tau2bench.projection import (
 from agent_system.environments.env_package.tau2bench.rewards import (
     compute_solver_accuracy,
     compute_solver_reward,
+    compute_solver_format_reward,
     compute_challenger_format_reward,
     compute_challenger_validity_reward,
     compute_challenger_reward,
@@ -246,6 +247,45 @@ class TestSolverRewards:
         reward, diag = compute_solver_reward(pred, gt)
         assert reward == 1.0
 
+    def test_solver_format_reward(self):
+        """Test format reward based on action validity flags."""
+        # All valid actions
+        assert compute_solver_format_reward([1, 1, 1, 1]) == 1.0
+        # Half valid
+        assert compute_solver_format_reward([1, 0, 1, 0]) == 0.5
+        # No valid actions
+        assert compute_solver_format_reward([0, 0, 0]) == 0.0
+        # Empty
+        assert compute_solver_format_reward([]) == 0.0
+
+    def test_solver_combined_reward_with_valids(self):
+        """Test compute_solver_reward with action_valids for format component."""
+        pred = [{"name": "get_order", "arguments": {"order_id": "123"}}]
+        gt = [{"name": "get_order", "arguments": {"order_id": "123"}}]
+
+        # Perfect match with all valid actions
+        reward, diag = compute_solver_reward(pred, gt, action_valids=[1, 1, 1])
+        assert reward == 1.0
+        assert diag["format_reward"] == 1.0
+        assert diag["tool_call_reward"] == 1.0
+        assert diag["task_success"] == 1.0  # fallback: tool_call >= 0.99
+
+        # Perfect tool-call match but poor format
+        reward2, diag2 = compute_solver_reward(pred, gt, action_valids=[1, 0, 0])
+        assert reward2 < 1.0
+        assert diag2["format_reward"] == pytest.approx(1.0 / 3.0)
+        assert diag2["tool_call_reward"] == 1.0
+
+    def test_solver_combined_reward_no_match(self):
+        """Test combined reward when tool calls don't match."""
+        pred = [{"name": "wrong", "arguments": {}}]
+        gt = [{"name": "get_order", "arguments": {"order_id": "123"}}]
+        reward, diag = compute_solver_reward(pred, gt, action_valids=[1])
+        # format=1.0, tool_call<1.0, task_success=0.0 (fallback)
+        assert diag["task_success"] == 0.0
+        assert diag["format_reward"] == 1.0
+        assert reward < 1.0
+
 
 class TestChallengerRewards:
     def test_format_reward_valid(self):
@@ -334,6 +374,7 @@ class TestSolverWorker:
         worker.domain = "mock"
         worker.rng = np.random.RandomState(42)
         worker.tool_calls_made = []
+        worker.action_valids = []
         worker.step_count = 0
         worker.policy = "Be helpful."
         worker.tool_schemas = [{"name": "get_info", "parameters": {}}]
@@ -352,6 +393,11 @@ class TestSolverWorker:
         worker.env.make_tool_call.return_value = {"status": "success"}
         worker.env.to_json_str.return_value = '{"status": "success"}'
         worker.env.sync_tools.return_value = None
+
+        # Mock evaluate for task success reward
+        eval_result = MagicMock()
+        eval_result.success = True
+        worker.env.evaluate.return_value = eval_result
 
         # Mock user sim
         worker.user_sim = MagicMock()
@@ -394,14 +440,21 @@ class TestSolverWorker:
     def test_compute_final_reward_correct(self):
         worker = self._make_mock_worker()
         worker.tool_calls_made = [{"name": "get_info", "arguments": {"id": "123"}}]
+        worker.action_valids = [1, 1]  # all valid format actions
         reward, diag = worker._compute_final_reward()
+        # format=1.0, tool_call=1.0, task_success=1.0 → 0.1+0.4+0.5=1.0
         assert reward == 1.0
+        assert diag["format_reward"] == 1.0
+        assert diag["task_success"] == 1.0
 
     def test_compute_final_reward_incorrect(self):
         worker = self._make_mock_worker()
         worker.tool_calls_made = [{"name": "wrong_func", "arguments": {"x": "y"}}]
+        worker.action_valids = [1, 0]  # partial format validity
+        worker.env.evaluate.return_value = MagicMock(success=False)
         reward, diag = worker._compute_final_reward()
         assert reward < 1.0
+        assert diag["task_success"] == 0.0
 
 
 class TestChallengerWorker:
