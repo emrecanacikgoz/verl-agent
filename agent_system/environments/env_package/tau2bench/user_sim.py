@@ -59,7 +59,22 @@ class LightUserSimulator:
         if self._client is None:
             from openai import OpenAI
             self._client = OpenAI(base_url=self.api_url, api_key="EMPTY")
+            self._resolve_model_name()
         return self._client
+
+    def _resolve_model_name(self):
+        """Auto-discover the served model name if the configured one isn't available."""
+        try:
+            models = self._client.models.list()
+            available = [m.id for m in models.data]
+            if self.model not in available and available:
+                print(
+                    f"[UserSim] Model '{self.model}' not found on server. "
+                    f"Available: {available}. Using '{available[0]}'."
+                )
+                self.model = available[0]
+        except Exception:
+            pass  # server may not support /v1/models; keep configured name
 
     def reset(self, user_instructions: str):
         """Reset with new instructions."""
