@@ -61,7 +61,7 @@ env.history_length=4
 env.rollout.n=8
 env.tau2bench.domain=retail          # retail, airline, telecom
 env.tau2bench.user_sim_url=http://localhost:8000/v1
-env.tau2bench.user_sim_model=Qwen/Qwen2.5-7B-Instruct
+env.tau2bench.user_sim_model=Qwen/Qwen2.5-1.5B-Instruct  # same base LLM
 ```
 
 ### Challenger Environment
@@ -109,12 +109,14 @@ The challenger outputs task specifications, parsed by `challenger_projection`:
 
 ### Solver Rewards (Sparse, Episode-End)
 
-Tool-call accuracy with three weighted components:
-- **Name match** (20%): Exact tool name matching
-- **Key F1** (30%): F1 score over argument keys
-- **Value match** (50%): Robust value comparison (handles numeric coercion, whitespace)
-
-Extra call penalty: `1 / (1 + 0.25 * num_extra_calls)`
+Combined reward from three components:
+- **Format reward** (W=0.1): Fraction of well-formatted agent actions (valid `<tool_call>`/`<response>` tags)
+- **Tool-call accuracy** (W=0.4): Granular accuracy with three sub-components:
+  - Name match (20%): Exact tool name matching
+  - Key F1 (30%): F1 score over argument keys
+  - Value match (50%): Robust value comparison (handles numeric coercion, whitespace)
+  - Extra call penalty: `1 / (1 + 0.25 * num_extra_calls)`
+- **Task success** (W=0.5): Binary 0/1 from tau-bench environment evaluation (1.0 if tool-call accuracy >= 0.99)
 
 ### Challenger Rewards
 

@@ -2,8 +2,9 @@
 Reward functions for tau2-bench environments.
 
 Solver rewards (sparse, at episode end):
+  - format: fraction of valid actions (proper <tool_call>/<response> tags)
   - tool-call accuracy: name match + argument key F1 + value match (Tool-R0 style)
-  - task success: binary based on tau-bench evaluation criteria
+  - task success: binary 0/1 from tau-bench environment evaluation
 
 Challenger rewards:
   - format: are all required XML tags present and parseable
@@ -32,6 +33,14 @@ LAMBDA_NAME = 0.2
 LAMBDA_PARAM_NAMES = 0.3
 LAMBDA_PARAM_VALUES = 0.5
 EXTRA_CALL_PENALTY_ALPHA = 0.25
+
+# Solver combined reward weights
+W_SOLVER_FORMAT = 0.1
+W_SOLVER_TOOL_CALL = 0.4
+W_SOLVER_TASK_SUCCESS = 0.5
+
+# Task success threshold: tool-call accuracy >= this → task is successful
+TASK_SUCCESS_THRESHOLD = 0.99
 
 # Challenger reward weights
 W_FORMAT = 0.5
@@ -237,23 +246,46 @@ def compute_solver_accuracy(
     return float(max(0.0, min(1.0, final))), diagnostics
 
 
-def compute_solver_reward(
-    tool_calls_made: List[Dict[str, Any]],
-    ground_truth_actions: List,
-) -> Tuple[float, Dict]:
-    """Compute the full solver episode reward.
+def compute_solver_format_reward(
+    action_validity_history: List[int],
+) -> float:
+    """Format reward for solver: fraction of valid actions during the episode.
 
-    Compares all tool calls the agent made during the episode against
-    the ground truth actions from tau-bench evaluation criteria.
+    Checks whether the agent consistently used proper output formatting
+    (<tool_call> or <response> tags) throughout the episode.
 
     Args:
-        tool_calls_made: list of {name, arguments} dicts from agent trajectory
-        ground_truth_actions: list of tau2 Action objects (or dicts with name, arguments, compare_args)
+        action_validity_history: list of 0/1 flags from solver_projection
 
     Returns:
-        (reward, diagnostics) where reward ∈ [0, 1]
+        Fraction of valid actions in [0, 1]. Returns 1.0 if no actions taken.
     """
-    # Convert ground truth actions to normalized dicts
+    if not action_validity_history:
+        return 1.0
+    return sum(action_validity_history) / len(action_validity_history)
+
+
+def compute_solver_task_success(
+    tool_call_accuracy: float,
+    threshold: float = TASK_SUCCESS_THRESHOLD,
+) -> float:
+    """Binary task success reward from tau-bench environment evaluation.
+
+    Returns 1.0 if the tool-call accuracy meets the threshold (task completed
+    successfully), 0.0 otherwise.
+
+    Args:
+        tool_call_accuracy: granular accuracy score from compute_solver_accuracy
+        threshold: minimum accuracy to consider the task successful
+
+    Returns:
+        Binary reward: 1.0 if successful, 0.0 otherwise.
+    """
+    return 1.0 if tool_call_accuracy >= threshold else 0.0
+
+
+def _normalize_gt_actions(ground_truth_actions: List) -> List[Dict[str, Any]]:
+    """Convert ground truth actions to normalized dicts."""
     gt_calls = []
     for action in ground_truth_actions:
         if hasattr(action, "name"):
@@ -274,8 +306,57 @@ def compute_solver_reward(
         else:
             continue
         gt_calls.append(gt_dict)
+    return gt_calls
 
-    return compute_solver_accuracy(tool_calls_made, gt_calls)
+
+def compute_solver_reward(
+    tool_calls_made: List[Dict[str, Any]],
+    ground_truth_actions: List,
+    action_validity_history: Optional[List[int]] = None,
+) -> Tuple[float, Dict]:
+    """Compute the full solver episode reward (format + tool-call + task success).
+
+    Combines three reward signals:
+      - format_reward (W=0.1): fraction of well-formatted agent actions
+      - tool_call_reward (W=0.4): granular tool-call accuracy (Tool-R0 style)
+      - task_success_reward (W=0.5): binary 0/1 from tau-bench evaluation
+
+    Args:
+        tool_calls_made: list of {name, arguments} dicts from agent trajectory
+        ground_truth_actions: list of tau2 Action objects (or dicts)
+        action_validity_history: list of 0/1 flags from solver_projection
+
+    Returns:
+        (reward, diagnostics) where reward ∈ [0, 1]
+    """
+    gt_calls = _normalize_gt_actions(ground_truth_actions)
+
+    # Component 1: Format reward
+    format_reward = compute_solver_format_reward(action_validity_history or [])
+
+    # Component 2: Tool-call accuracy (granular)
+    tool_call_reward, accuracy_diag = compute_solver_accuracy(tool_calls_made, gt_calls)
+
+    # Component 3: Binary task success from tau-bench environment
+    task_success = compute_solver_task_success(tool_call_reward)
+
+    # Combined reward
+    reward = (
+        W_SOLVER_FORMAT * format_reward
+        + W_SOLVER_TOOL_CALL * tool_call_reward
+        + W_SOLVER_TASK_SUCCESS * task_success
+    )
+    reward = float(max(0.0, min(1.0, reward)))
+
+    diagnostics = {
+        **accuracy_diag,
+        "format_reward": float(format_reward),
+        "tool_call_reward": float(tool_call_reward),
+        "task_success": float(task_success),
+        "combined_reward": float(reward),
+    }
+
+    return reward, diagnostics
 
 
 # ===================================================================

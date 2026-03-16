@@ -46,6 +46,7 @@ class _SolverWorker:
         self.task = None
         self.user_sim = None
         self.tool_calls_made: List[Dict] = []
+        self.action_validity_history: List[int] = []
         self.step_count = 0
         self.policy = ""
         self.tool_schemas: List[Dict] = []
@@ -78,6 +79,7 @@ class _SolverWorker:
 
         # Reset state
         self.tool_calls_made = []
+        self.action_validity_history = []
         self.step_count = 0
 
         # Initialize user simulator
@@ -110,6 +112,10 @@ class _SolverWorker:
         """
         self.step_count += 1
         action_type = parsed_action.get("type", "invalid")
+
+        # Track action validity for format reward
+        is_valid = 1 if action_type in ("tool_call", "response", "stop") else 0
+        self.action_validity_history.append(is_valid)
 
         if action_type == "tool_call":
             return self._handle_tool_calls(parsed_action["calls"])
@@ -177,7 +183,7 @@ class _SolverWorker:
         }
 
     def _compute_final_reward(self) -> Tuple[float, Dict]:
-        """Compute sparse episode reward based on tool-call accuracy."""
+        """Compute sparse episode reward (format + tool-call + task success)."""
         if self.task.evaluation_criteria is None:
             return 0.0, {}
         if self.task.evaluation_criteria.actions is None:
@@ -194,7 +200,7 @@ class _SolverWorker:
 
         from agent_system.environments.env_package.tau2bench.rewards import compute_solver_reward
         reward, diagnostics = compute_solver_reward(
-            self.tool_calls_made, gt_actions
+            self.tool_calls_made, gt_actions, self.action_validity_history
         )
         return reward, diagnostics
 

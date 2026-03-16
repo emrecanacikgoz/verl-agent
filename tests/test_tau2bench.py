@@ -41,6 +41,8 @@ from agent_system.environments.env_package.tau2bench.projection import (
 from agent_system.environments.env_package.tau2bench.rewards import (
     compute_solver_accuracy,
     compute_solver_reward,
+    compute_solver_format_reward,
+    compute_solver_task_success,
     compute_challenger_format_reward,
     compute_challenger_validity_reward,
     compute_challenger_reward,
@@ -232,6 +234,27 @@ class TestSolverRewards:
         assert robust_value_match("hello world", "hello  world")
         assert not robust_value_match("hello", "world")
 
+    def test_solver_format_reward_all_valid(self):
+        reward = compute_solver_format_reward([1, 1, 1, 1])
+        assert reward == 1.0
+
+    def test_solver_format_reward_mixed(self):
+        reward = compute_solver_format_reward([1, 0, 1, 0])
+        assert reward == 0.5
+
+    def test_solver_format_reward_empty(self):
+        reward = compute_solver_format_reward([])
+        assert reward == 1.0
+
+    def test_solver_task_success_pass(self):
+        assert compute_solver_task_success(1.0) == 1.0
+        assert compute_solver_task_success(0.99) == 1.0
+
+    def test_solver_task_success_fail(self):
+        assert compute_solver_task_success(0.98) == 0.0
+        assert compute_solver_task_success(0.5) == 0.0
+        assert compute_solver_task_success(0.0) == 0.0
+
     def test_solver_reward_with_action_objects(self):
         """Test compute_solver_reward with mock Action-like objects."""
         class MockAction:
@@ -243,8 +266,23 @@ class TestSolverRewards:
 
         pred = [{"name": "get_user", "arguments": {"user_id": "abc"}}]
         gt = [MockAction("get_user", {"user_id": "abc", "extra": "ignored"}, compare_args=["user_id"])]
-        reward, diag = compute_solver_reward(pred, gt)
-        assert reward == 1.0
+        validity = [1, 1, 1]  # 3 valid actions
+        reward, diag = compute_solver_reward(pred, gt, validity)
+        assert reward > 0.9  # High reward: perfect tool-call + good format + task success
+        assert diag["task_success"] == 1.0
+        assert diag["format_reward"] == 1.0
+        assert diag["tool_call_reward"] == 1.0
+
+    def test_solver_reward_combined_components(self):
+        """Test that combined reward includes all three components."""
+        pred = [{"name": "wrong", "arguments": {}}]
+        gt_calls = [{"name": "correct", "arguments": {"x": 1}}]
+        validity = [1, 0]  # 50% format
+        reward, diag = compute_solver_reward(pred, gt_calls, validity)
+        assert diag["format_reward"] == 0.5
+        assert diag["task_success"] == 0.0  # tool-call accuracy too low
+        assert diag["tool_call_reward"] < 1.0
+        assert reward < 0.5
 
 
 class TestChallengerRewards:
@@ -334,6 +372,7 @@ class TestSolverWorker:
         worker.domain = "mock"
         worker.rng = np.random.RandomState(42)
         worker.tool_calls_made = []
+        worker.action_validity_history = []
         worker.step_count = 0
         worker.policy = "Be helpful."
         worker.tool_schemas = [{"name": "get_info", "parameters": {}}]

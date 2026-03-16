@@ -33,7 +33,7 @@ export CUDA_VISIBLE_DEVICES=${CUDA_VISIBLE_DEVICES}
 # ─────────────────────────────────────────────────────────────────────────────
 DOMAIN=${DOMAIN:-"retail"}                              # retail, airline, telecom
 USER_SIM_URL=${USER_SIM_URL:-"http://localhost:8000/v1"}
-USER_SIM_MODEL=${USER_SIM_MODEL:-"Qwen/Qwen2.5-7B-Instruct"}
+USER_SIM_MODEL=${USER_SIM_MODEL:-"${MODEL}"}
 MODEL=${MODEL:-"Qwen/Qwen2.5-1.5B-Instruct"}
 
 num_cpus_per_env_worker=0.1
