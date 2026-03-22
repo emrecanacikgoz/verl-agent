@@ -58,24 +58,48 @@ Now respond with your reasoning and action."""
 # Challenger prompts
 # ===================================================================
 
-TAU2BENCH_CHALLENGER_SYSTEM = """You are a task generator for customer service benchmarks.
-Your job is to create realistic, challenging customer service scenarios that test an AI agent's ability to use tools correctly.
+TAU2BENCH_CHALLENGER_SYSTEM = """You are an expert task generator for a customer service agent benchmark.
 
-You will be given a domain's policy and available tools. Generate a complete task specification."""
+Given a domain, its policy, available tools, and a database context (real user/order data), you must generate a realistic customer service scenario.
 
+DOMAIN: {domain}
+
+POLICY:
+{policy}
+
+AVAILABLE TOOLS:
+{tools_text}
+
+DATABASE CONTEXT (real data you MUST reference):
+{context_text}
+
+RULES:
+1. The user instructions must describe a realistic customer request grounded in the database context.
+2. The expected actions must be a valid sequence of tool calls the agent should make to resolve the request.
+3. Action argument values MUST reference real IDs from the database context (user_id, reservation_id, order_id, etc.).
+4. Every action name MUST be one of the available tools listed above.
+5. Include the user identification step (get_user_details for airline, find_user_id_by_name_zip or find_user_id_by_email for retail).
+6. The user instructions should NOT reveal internal IDs like user_id — only information a real customer would know (name, email, reservation details).
+7. Keep the scenario focused — 2 to 6 expected actions is typical.
+
+OUTPUT FORMAT — Output exactly these XML tags, nothing else:
+
+<think>
+Your reasoning about what scenario to create given the database context.
+</think>
+
+<instructions>
+Natural language instructions for the user simulator. Write as if briefing someone to play the role of this customer. Include what they want, what they know, and how they should behave.
+</instructions>
+
+<actions>
+A JSON list of expected agent tool calls in order. Each entry must have "name" and "arguments".
+Example: [{{"name": "tool_name", "arguments": {{"param1": "value1"}}}}]
+</actions>"""
+
+TAU2BENCH_CHALLENGER_USER = "Generate a realistic customer service scenario now. Ground it in the database context provided."
+
+# Legacy flat template (used by env_manager; workers now build prompts directly)
 TAU2BENCH_CHALLENGER_TEMPLATE = """{system_prompt}
 
-{domain_info}
-
-## Instructions
-Generate a realistic customer service task for this domain. Your output MUST include:
-
-1. <think>Your reasoning about what would make a good, challenging task</think>
-
-2. <question>A natural language description of the customer's situation and what they need help with. This should be detailed enough for a user simulator to role-play the customer.</question>
-
-3. <available_tools>A JSON list of the relevant tools for this task (subset or all of the domain tools). Each tool should have "name" and "parameters" fields.</available_tools>
-
-4. <tool_call_answer>The correct tool call(s) the agent should make to resolve this task. Format as JSON: {{"name": "tool_name", "arguments": {{"key": "value"}}}}</tool_call_answer>
-
-Make the task realistic - use plausible names, IDs, and values. The task should require the agent to use tools correctly."""
+{user_prompt}"""

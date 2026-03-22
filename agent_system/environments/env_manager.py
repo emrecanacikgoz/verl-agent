@@ -755,17 +755,8 @@ class Tau2BenchChallengerEnvironmentManager(EnvironmentManagerBase):
     def build_text_obs(
         self, text_obs: List[str], init: bool = False
     ) -> List[str]:
-        postprocess_text_obs = []
-        for i in range(len(text_obs)):
-            if init:
-                obs = TAU2BENCH_CHALLENGER_TEMPLATE.format(
-                    system_prompt=TAU2BENCH_CHALLENGER_SYSTEM,
-                    domain_info=text_obs[i],
-                )
-            else:
-                obs = text_obs[i]  # After step, challenger is done
-            postprocess_text_obs.append(obs)
-        return postprocess_text_obs
+        # Workers now return fully formatted prompts (system + DB context + user prompt)
+        return list(text_obs)
 
     def _process_batch(self, batch_idx, total_batch_list, total_infos, success):
         for i in reversed(range(len(total_batch_list[batch_idx]))):
@@ -878,6 +869,10 @@ def make_envs(config):
             solver_projection,
         )
         tau2_cfg = config.env.tau2bench
+        tool_call_reward_coef = getattr(tau2_cfg, "tool_call_reward_coef", 0.5)
+        task_success_reward_coef = getattr(tau2_cfg, "task_success_reward_coef", 0.5)
+        # TOD-Zero: optional path to challenger-generated user goals
+        challenger_scenarios_path = getattr(tau2_cfg, "challenger_scenarios_path", None)
         _envs = build_tau2bench_solver_envs(
             domain=tau2_cfg.domain,
             user_sim_url=tau2_cfg.user_sim_url,
@@ -886,6 +881,9 @@ def make_envs(config):
             env_num=config.data.train_batch_size,
             group_n=group_n,
             is_train=True,
+            tool_call_reward_coef=tool_call_reward_coef,
+            task_success_reward_coef=task_success_reward_coef,
+            challenger_scenarios_path=challenger_scenarios_path,
         )
         _val_envs = build_tau2bench_solver_envs(
             domain=tau2_cfg.domain,
@@ -895,6 +893,9 @@ def make_envs(config):
             env_num=config.data.val_batch_size,
             group_n=1,
             is_train=False,
+            tool_call_reward_coef=tool_call_reward_coef,
+            task_success_reward_coef=task_success_reward_coef,
+            # val always uses registry tasks for clean evaluation
         )
         projection_f = partial(solver_projection)
         envs = Tau2BenchSolverEnvironmentManager(_envs, projection_f, config)

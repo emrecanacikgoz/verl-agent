@@ -20,17 +20,10 @@ RE_RESPONSE = re.compile(
 )
 
 # ---------------------------------------------------------------------------
-# Challenger tag patterns (same as Tool-R0 generator)
+# Challenger tag patterns — TOD-Zero: instructions + actions
 # ---------------------------------------------------------------------------
-RE_QUESTION = re.compile(
-    r"<question>(.*?)</question>", re.DOTALL | re.IGNORECASE
-)
-RE_AVAILABLE_TOOLS = re.compile(
-    r"<available_tools>(.*?)</available_tools>", re.DOTALL | re.IGNORECASE
-)
-RE_TOOL_CALL_ANSWER = re.compile(
-    r"<tool_call_answer>(.*?)</tool_call_answer>", re.DOTALL | re.IGNORECASE
-)
+RE_INSTRUCTIONS = re.compile(r"<instructions>(.*?)</instructions>", re.DOTALL | re.IGNORECASE)
+RE_ACTIONS_TAG = re.compile(r"<actions>(.*?)</actions>", re.DOTALL | re.IGNORECASE)
 
 
 def _safe_json_loads(s: str):
@@ -115,35 +108,43 @@ def solver_projection(actions: List[str]) -> Tuple[List[Dict], List[int]]:
 
 
 def challenger_projection(actions: List[str]) -> Tuple[List[Dict], List[int]]:
-    """Parse challenger text outputs into task specifications.
+    """Parse challenger text outputs into instructions + expected actions (TOD-Zero).
 
-    Expected format (matching Tool-R0 generator):
-        <question>...</question>
-        <available_tools>...</available_tools>
-        <tool_call_answer>...</tool_call_answer>
+    Expected format:
+        <instructions>Natural language briefing for the user simulator.</instructions>
+        <actions>[{"name": "tool_name", "arguments": {...}}, ...]</actions>
 
     Returns:
-        results: list of task spec dicts or invalid markers
+        results: list of parsed challenger dicts or invalid markers
         valids: list of 0/1 validity flags
     """
     results: List[Dict] = []
     valids: List[int] = []
 
     for action in actions:
-        q_matches = RE_QUESTION.findall(action)
-        t_matches = RE_AVAILABLE_TOOLS.findall(action)
-        a_matches = RE_TOOL_CALL_ANSWER.findall(action)
+        instr_matches = RE_INSTRUCTIONS.findall(action)
+        act_matches = RE_ACTIONS_TAG.findall(action)
 
-        if q_matches and t_matches and a_matches:
-            results.append({
-                "type": "task_spec",
-                "question": q_matches[-1].strip(),
-                "available_tools": t_matches[-1].strip(),
-                "tool_call_answer": a_matches[-1].strip(),
-            })
-            valids.append(1)
-        else:
-            results.append({"type": "invalid", "raw": action})
-            valids.append(0)
+        if instr_matches and act_matches:
+            instructions = instr_matches[-1].strip()
+            actions_str = act_matches[-1].strip()
+            parsed_actions = _safe_json_loads(actions_str)
+
+            if (
+                len(instructions) >= 20
+                and isinstance(parsed_actions, list)
+                and len(parsed_actions) > 0
+                and all(isinstance(a, dict) and "name" in a for a in parsed_actions)
+            ):
+                results.append({
+                    "type": "challenger_output",
+                    "instructions": instructions,
+                    "actions": parsed_actions,
+                })
+                valids.append(1)
+                continue
+
+        results.append({"type": "invalid", "raw": action})
+        valids.append(0)
 
     return results, valids

@@ -3,7 +3,8 @@ Reward functions for tau2-bench environments.
 
 Solver rewards (sparse, at episode end):
   - tool-call accuracy: name match + argument key F1 + value match (Tool-R0 style)
-  - task success: binary based on tau-bench evaluation criteria
+  - task success: binary based on tau-bench native evaluation criteria (DB state, actions, communicate)
+  - combined: weighted sum of both
 
 Challenger rewards:
   - format: are all required XML tags present and parseable
@@ -12,7 +13,7 @@ Challenger rewards:
 
 import json
 import re
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any, Callable, Dict, List, Optional, Tuple
 
 def _safe_json_loads(s: str):
     """Best-effort JSON parse."""
@@ -279,121 +280,271 @@ def compute_solver_reward(
 
 
 # ===================================================================
-# Challenger reward functions
+# Challenger reward functions (TOD-Zero: instructions + actions)
 # ===================================================================
-
-def compute_challenger_format_reward(action: Dict) -> float:
-    """Format reward for challenger output.
-
-    Graded:
-      +0.33 if <question> tag present and non-empty
-      +0.33 if <available_tools> parses as valid JSON list
-      +0.34 if <tool_call_answer> parses and normalizes
-    """
-    if action.get("type") != "task_spec":
-        return 0.0
-
-    reward = 0.0
-
-    # Question present
-    question = action.get("question", "")
-    if question and len(question.strip()) > 5:
-        reward += 0.33
-
-    # Available tools parse as JSON list
-    tools_text = action.get("available_tools", "")
-    tools = _safe_json_loads(tools_text)
-    if isinstance(tools, list) and len(tools) > 0:
-        # Check each tool has a name
-        if all(isinstance(t, dict) and "name" in t for t in tools):
-            reward += 0.33
-
-    # Tool call answer parses and normalizes
-    answer_text = action.get("tool_call_answer", "")
-    answer = _safe_json_loads(answer_text)
-    if answer is not None:
-        norm = normalize_tool_call(answer)
-        if norm is not None:
-            reward += 0.34
-
-    return min(1.0, reward)
-
-
-def compute_challenger_validity_reward(
-    action: Dict,
-    domain_tool_names: Optional[set] = None,
-) -> float:
-    """Validity reward for challenger output.
-
-    Checks:
-      +0.4 if gold tool name exists in available_tools
-      +0.4 if gold arguments match tool schema (required params present)
-      +0.2 if argument values are grounded (non-empty, non-placeholder)
-    """
-    if action.get("type") != "task_spec":
-        return 0.0
-
-    tools_text = action.get("available_tools", "")
-    answer_text = action.get("tool_call_answer", "")
-
-    tools = _safe_json_loads(tools_text)
-    if not isinstance(tools, list) or len(tools) == 0:
-        return 0.0
-
-    answer_obj = _safe_json_loads(answer_text)
-    gold = normalize_tool_call(answer_obj)
-    if gold is None:
-        return 0.0
-
-    tool_index = {t["name"]: t for t in tools if isinstance(t, dict) and "name" in t}
-    reward = 0.0
-
-    # Gold tool name exists in available_tools
-    gold_name = gold["name"]
-    if gold_name in tool_index:
-        reward += 0.4
-
-        # Check arguments against schema
-        tool_spec = tool_index[gold_name]
-        schema = tool_spec.get("parameters")
-        if schema is not None and isinstance(schema, dict):
-            required = schema.get("required", [])
-            if isinstance(required, list):
-                gold_args = gold.get("arguments", {})
-                if all(k in gold_args for k in required):
-                    reward += 0.4
-                else:
-                    # Partial credit
-                    if required:
-                        reward += 0.4 * sum(1 for k in required if k in gold_args) / len(required)
-            else:
-                reward += 0.4  # No required fields specified
-        else:
-            reward += 0.4  # No schema to validate against
-
-        # Check argument values are non-trivial
-        gold_args = gold.get("arguments", {})
-        if gold_args:
-            non_empty = sum(
-                1 for v in gold_args.values()
-                if v is not None and str(v).strip() != ""
-            )
-            reward += 0.2 * (non_empty / len(gold_args))
-        else:
-            reward += 0.2
-
-    # Optionally check against domain tools
-    if domain_tool_names is not None and gold_name not in domain_tool_names:
-        reward *= 0.5  # Penalty for using tools not in domain
-
-    return min(1.0, reward)
-
 
 def compute_challenger_reward(
     action: Dict,
     domain_tool_names: Optional[set] = None,
+    domain_keywords: Optional[List[str]] = None,
 ) -> float:
-    """Combined challenger reward (format + validity)."""
-    fmt = compute_challenger_format_reward(action)
-    val = compute_challenger_validity_reward(action, domain_tool_names)
-    return W_FORMAT * fmt + W_VALIDITY * val
+    """Reward for TOD-Zero challenger: format + tool validity + arg validity.
+
+    Mirrors the TRL self-play reward_format_and_validity:
+      R_format       (0.0–1.0): 4 x 0.25 sub-components
+        +0.25  <think> tag present and non-empty
+        +0.25  <instructions> tag present and non-empty (>10 chars)
+        +0.25  <actions> tag parses as JSON list with ≥1 item
+        +0.25  every action has a non-empty "name" (str) and "arguments" (dict)
+      R_tool_validity (0.0–1.0): fraction of action names in domain tool set
+      R_arg_validity  (0.0–1.0): fraction of valid arg names per action
+
+    Combined: 0.4 * R_format + 0.3 * R_tool_validity + 0.3 * R_arg_validity
+
+    Args:
+        action: parsed challenger action dict from challenger_projection
+        domain_tool_names: set of valid tool names for this domain
+        domain_keywords: unused (kept for API compatibility)
+    """
+    if action.get("type") != "challenger_output":
+        return 0.0
+
+    instructions = action.get("instructions", "")
+    actions_list = action.get("actions", [])
+
+    # --- R_format ---
+    r_format = 0.0
+    # think: we don't have it post-projection, but instructions presence covers most of it
+    r_format += 0.25  # challenger_projection already validated instructions presence
+    if len(instructions) > 10:
+        r_format += 0.25
+    if isinstance(actions_list, list) and len(actions_list) > 0:
+        r_format += 0.25
+        all_valid_shape = all(
+            isinstance(a, dict)
+            and isinstance(a.get("name"), str)
+            and a["name"].strip()
+            and isinstance(a.get("arguments", {}), dict)
+            for a in actions_list
+        )
+        if all_valid_shape:
+            r_format += 0.25
+
+    # --- R_tool_validity ---
+    r_tool = 0.0
+    if domain_tool_names and isinstance(actions_list, list) and actions_list:
+        valid_count = sum(1 for a in actions_list if a.get("name") in domain_tool_names)
+        r_tool = valid_count / len(actions_list)
+
+    # --- R_arg_validity ---
+    r_arg = 0.0
+    if domain_tool_names is not None and isinstance(actions_list, list) and actions_list:
+        from agent_system.environments.env_package.tau2bench.db_sampler import DOMAIN_TOOLS
+        # Build tool index for any domain that has the tool names
+        all_tools = []
+        for tools in DOMAIN_TOOLS.values():
+            all_tools.extend(tools)
+        tool_index = {t["name"]: t for t in all_tools}
+
+        scores = []
+        for a in actions_list:
+            tool_spec = tool_index.get(a.get("name", ""))
+            if tool_spec is None:
+                scores.append(0.0)
+                continue
+            expected_params = set(tool_spec["parameters"].keys())
+            provided_params = set((a.get("arguments") or {}).keys())
+            if not expected_params and not provided_params:
+                scores.append(1.0)
+            elif not expected_params:
+                scores.append(0.0)
+            else:
+                valid = len(provided_params & expected_params)
+                total = len(provided_params | expected_params)
+                scores.append(valid / total if total > 0 else 0.0)
+        r_arg = sum(scores) / len(scores) if scores else 0.0
+
+    return float(min(1.0, 0.4 * r_format + 0.3 * r_tool + 0.3 * r_arg))
+
+
+# ===================================================================
+# Task success reward (tau2-bench native evaluator)
+# ===================================================================
+
+def compute_task_success_reward(
+    env_constructor: Callable,
+    task: Any,
+    message_history: list,
+    domain: str,
+    termination_reason: Any,
+) -> Tuple[float, Dict]:
+    """Compute tau2-bench native task success reward.
+
+    Runs the full tau2-bench evaluator (DB state, action match, communicate checks)
+    against the completed conversation trajectory.
+
+    Args:
+        env_constructor: tau2-bench environment factory (from registry)
+        task: tau2 Task object with evaluation_criteria
+        message_history: list of tau2 Message objects built during the episode
+        domain: domain name (e.g. "retail", "airline")
+        termination_reason: tau2 TerminationReason enum value
+
+    Returns:
+        (reward ∈ [0, 1], diagnostics dict)
+    """
+    try:
+        from uuid import uuid4
+        from tau2.data_model.simulation import SimulationRun
+        from tau2.evaluator.evaluator import evaluate_simulation, EvaluationType
+        from tau2.utils.utils import get_now
+
+        now = get_now()
+        sim = SimulationRun(
+            id=str(uuid4()),
+            task_id=task.id,
+            start_time=now,
+            end_time=now,
+            duration=0.0,
+            termination_reason=termination_reason,
+            messages=message_history,
+        )
+        reward_info = evaluate_simulation(
+            simulation=sim,
+            task=task,
+            evaluation_type=EvaluationType.ALL,
+            solo_mode=False,
+            domain=domain,
+        )
+        diagnostics = {
+            "task_success_reward": reward_info.reward,
+            "reward_breakdown": {
+                k.value: v for k, v in (reward_info.reward_breakdown or {}).items()
+            },
+            "db_match": reward_info.db_check.db_match if reward_info.db_check else None,
+        }
+        return float(reward_info.reward), diagnostics
+    except Exception as e:
+        print(f"[Tau2Solver] Warning: task_success evaluation failed: {e}")
+        return 0.0, {"task_success_error": str(e)}
+
+
+def compute_combined_reward(
+    env_constructor: Callable,
+    task: Any,
+    tool_calls_made: List[Dict[str, Any]],
+    message_history: list,
+    domain: str,
+    termination_reason: Any,
+    tool_call_reward_coef: float = 0.5,
+    task_success_reward_coef: float = 0.5,
+) -> Tuple[float, Dict]:
+    """Weighted combination of tool-call accuracy and tau2-bench task success.
+
+    tool_call_reward  – continuous [0, 1] greedy F1 over tool name/args
+    task_success_reward – binary [0, 1] from tau2-bench DB + action + communicate evaluators
+
+    combined = tool_call_reward_coef * tool_call_reward
+             + task_success_reward_coef * task_success_reward
+
+    Args:
+        env_constructor: tau2-bench environment factory
+        task: tau2 Task object
+        tool_calls_made: list of {name, arguments} dicts collected during episode
+        message_history: list of tau2 Message objects built during the episode
+        domain: domain name
+        termination_reason: tau2 TerminationReason enum value
+        tool_call_reward_coef: weight for tool-call accuracy
+        task_success_reward_coef: weight for task success
+
+    Returns:
+        (combined_reward ∈ [0, 1], diagnostics dict)
+    """
+    # --- Tool-call accuracy (continuous) ---
+    tc_reward = 0.0
+    tc_diagnostics: Dict[str, Any] = {}
+    if task.evaluation_criteria is not None and task.evaluation_criteria.actions is not None:
+        gt_actions = [
+            a for a in task.evaluation_criteria.actions
+            if a.requestor == "assistant"
+        ]
+        if not gt_actions and not tool_calls_made:
+            tc_reward = 1.0
+            tc_diagnostics = {"note": "no_actions_expected_or_made"}
+        else:
+            tc_reward, tc_diagnostics = compute_solver_reward(tool_calls_made, gt_actions)
+
+    # --- Task success (binary, tau2-bench native) ---
+    ts_reward, ts_diagnostics = compute_task_success_reward(
+        env_constructor=env_constructor,
+        task=task,
+        message_history=message_history,
+        domain=domain,
+        termination_reason=termination_reason,
+    )
+
+    combined = tool_call_reward_coef * tc_reward + task_success_reward_coef * ts_reward
+    diagnostics = {
+        "tool_call_reward": tc_reward,
+        "tool_call_reward_coef": tool_call_reward_coef,
+        "task_success_reward": ts_reward,
+        "task_success_reward_coef": task_success_reward_coef,
+        "combined_reward": float(combined),
+        "tool_call_diagnostics": tc_diagnostics,
+        "task_success_diagnostics": ts_diagnostics,
+    }
+    return float(max(0.0, min(1.0, combined))), diagnostics
+
+
+# ===================================================================
+# Synthetic solver reward (TOD-Zero: no ground-truth eval criteria)
+# ===================================================================
+
+def compute_synthetic_reward(
+    termination_reason: Any,
+    tool_calls_made: List[Dict[str, Any]],
+    completion_coef: float = 0.7,
+    tool_usage_coef: float = 0.3,
+) -> Tuple[float, Dict]:
+    """Reward for solver trained on challenger-generated scenarios.
+
+    Used when no ground-truth evaluation criteria exist (synthetic tasks).
+    Signal comes entirely from user simulator satisfaction and tool usage.
+
+    Components:
+      R_completion (0.0-1.0): did the user simulator signal task completion?
+        - USER_STOP  → 1.0  (user satisfied)
+        - AGENT_STOP → 0.5  (agent ended; partial credit)
+        - timeout    → 0.0  (no resolution)
+      R_tool_usage (0.0-1.0): did the agent make successful API calls?
+        - min(1.0, n_successful_calls / 2)
+
+    Returns:
+        (reward ∈ [0, 1], diagnostics dict)
+    """
+    # --- R_completion ---
+    # Compare directly against enum values to avoid Python-version-dependent str() behavior.
+    # TerminationReason(str, Enum) has lowercase values ("user_stop"), so string-based
+    # uppercase checks ("USER_STOP" in str(...)) fail in Python 3.12.
+    from tau2.data_model.simulation import TerminationReason
+    if termination_reason == TerminationReason.USER_STOP:
+        r_completion = 1.0
+    elif termination_reason == TerminationReason.AGENT_STOP:
+        r_completion = 0.5
+    else:
+        r_completion = 0.0
+
+    # --- R_tool_usage: reward for making at least 2 successful tool calls ---
+    n_calls = len(tool_calls_made)
+    r_tool = min(1.0, n_calls / 2.0)
+
+    combined = completion_coef * r_completion + tool_usage_coef * r_tool
+    diagnostics = {
+        "synthetic_mode": True,
+        "termination_reason": str(termination_reason),
+        "completion_reward": r_completion,
+        "tool_usage_reward": r_tool,
+        "n_successful_tool_calls": n_calls,
+        "combined_reward": float(combined),
+    }
+    return float(max(0.0, min(1.0, combined))), diagnostics
