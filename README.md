@@ -41,6 +41,7 @@ Unlike prior approaches that simply concatenate full interaction histories, `ver
 `verl-agent` provides a **diverse set of RL algorithms** (including our new algorithm GiGPO) and a **rich suite of agent environments**, enabling the development of reasoning agents in both visual and text-based tasks.
 
 # News
+- [2026.03] **TOD-Zero** released — self-play RL for task-oriented dialogue agents with **zero human-annotated dialogues**, using [Tau-Bench 2](https://github.com/emrecanacikgoz/tau2-bench). See [TAU_BENCH_README.md](./TAU_BENCH_README.md).
 - [2026.02] `HGPO` accepted at [ICLR 2026](https://iclr.cc/)! 🎉🎉🎉 [[Paper](https://openreview.net/forum?id=T8Dev99qnz)] [[Code](https://github.com/langfengQ/verl-agent/tree/master/recipe/hgpo)]
 - [2026.02] 🔥 We open-source [Dr. MAS](https://github.com/langfengQ/DrMAS), which supports stable end-to-end RL post-training of **multi-agent LLM systems**! [[Paper](https://arxiv.org/pdf/2602.08847)] [[Code](https://github.com/langfengQ/DrMAS)]
 - [2025.12] `Qwen3-VL` is supported! See example [here](./examples/gigpo_trainer/run_sokoban_qwen3vl.sh).
@@ -63,7 +64,7 @@ Unlike prior approaches that simply concatenate full interaction histories, `ver
 | **Model Support**        | ✅ Qwen3<br>✅ Qwen3-VL<br>✅ Qwen2.5<br>✅ Qwen2.5-VL<br>✅ LLaMA3.2<br>and more |
 | **Modality**             | ✅ Text-only<br>✅ Text + Image (multi-modal) |
 | **Lightweight Training** | ✅ Supports LoRA training |
-| **Environments**         | ✅ ALFWorld<br>✅ WebShop<br> ✅ Search (Tool Calling)<br> ✅ Sokoban<br>✅ Gym Cards<br>✅ AppWorld |
+| **Environments**         | ✅ ALFWorld<br>✅ WebShop<br> ✅ Search (Tool Calling)<br> ✅ Sokoban<br>✅ Gym Cards<br>✅ AppWorld<br>✅ **Tau-Bench 2** (TOD self-play) |
 | **RL Algorithms**        | ✅ GiGPO<br>✅ GRPO<br>✅ PPO<br>✅ DAPO<br>✅ GSPO<br>✅ RLOO<br>✅ REINFORCE++<br>✅ Dynamic sampling & clip-higher supported <br> and more |
 | **Prompt-based Agent**   | ✅ GPT-4o prompt-based agent  |
 
@@ -94,6 +95,7 @@ Unlike prior approaches that simply concatenate full interaction histories, `ver
     - [4. RLOO](#4-rloo)  
     - [5. DAPO](#5-dapo)  
     - [6. GiGPO (dynamic)](#6-gigpo-dynamic)
+  - [Tau-Bench 2 (TOD-Zero Self-Play)](#tau-bench-2-tod-zero-self-play)
   - [LoRA](#lora)
   - [Prompt-based Agent with GPT-4o](#prompt-based-agent-with-gpt-4o)
 - [FAQ](#faq)
@@ -138,8 +140,8 @@ Unlike prior approaches that simply concatenate full interaction histories, `ver
   Beyond text-based agents, `verl-agent` also supports training vision-language agents. This enables multi-modal reasoning in environments where both visual perception and language understanding are required.
 
 - **Rich Suite of Environments**
-  
-  `verl-agent` offers a diverse set of interactive environments including [Search-R1](https://github.com/PeterGriffinJin/Search-R1) experiment, embodied AI environments like [ALFWorld](https://github.com/alfworld/alfworld), visual games such as [Sokoban](https://github.com/mpSchrader/gym-sokoban) and [Gym Cards](https://github.com/RL4VLM/RL4VLM/blob/main/gym-cards/README.md), and digital interface control tasks like [WebShop](https://github.com/princeton-nlp/WebShop) and [AppWorld](https://github.com/stonybrooknlp/appworld/) (experimental). 
+
+  `verl-agent` offers a diverse set of interactive environments including [Search-R1](https://github.com/PeterGriffinJin/Search-R1) experiment, embodied AI environments like [ALFWorld](https://github.com/alfworld/alfworld), visual games such as [Sokoban](https://github.com/mpSchrader/gym-sokoban) and [Gym Cards](https://github.com/RL4VLM/RL4VLM/blob/main/gym-cards/README.md), digital interface control tasks like [WebShop](https://github.com/princeton-nlp/WebShop) and [AppWorld](https://github.com/stonybrooknlp/appworld/) (experimental), and **[Tau-Bench 2](https://github.com/emrecanacikgoz/tau2-bench)** for task-oriented dialogue with tool calling via the TOD-Zero self-play framework.
 
 - **Diverse RL Algorithms**
 
@@ -444,6 +446,25 @@ bash examples/gigpo_dynamic_trainer/run_alfworld.sh # ALFWorld
 ```bash
 bash examples/gigpo_dynamic_trainer/run_webshop.sh # WebShop
 ```
+
+## Tau-Bench 2 (TOD-Zero Self-Play)
+
+TOD-Zero trains task-oriented dialogue agents via self-play RL — no human-authored dialogues required. A **Challenger** generates user goals from API schemas; a fixed **User Simulator** role-plays the customer; a **Solver** learns to complete requests via tool calls. All three start from the same base LLM.
+
+```bash
+# Full self-play loop (5 iterations, airline domain)
+BASE_MODEL=Qwen/Qwen2.5-3B-Instruct \
+DOMAIN=airline \
+ITERATIONS=5 \
+bash examples/gigpo_trainer/run_tod_zero.sh
+```
+
+```bash
+# Standard solver training (with user simulator, no self-play)
+bash examples/gigpo_trainer/run_tau2bench.sh
+```
+
+See [TAU_BENCH_README.md](./TAU_BENCH_README.md) for the full guide.
 
 ## LoRA
 ```bash

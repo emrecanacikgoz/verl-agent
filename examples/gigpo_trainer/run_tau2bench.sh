@@ -11,7 +11,7 @@
 #   bash run_tau2bench.sh --eval-only /path/to/checkpoint  # eval only
 #
 # Requirements:
-#   - 4x GPUs (2 for training, 1-2 for user sim vLLM server)
+#   - 8x GPUs (6 for training, 1 for user sim vLLM server)
 #   - tau2-bench: pip install git+https://github.com/emrecanacikgoz/tau2-bench.git
 #   - verl-agent: pip install -e . (from repo root)
 # ============================================================================
@@ -21,11 +21,11 @@ set -euo pipefail
 # ─────────────────────────────────────────────────────────────────────────────
 # Configuration
 # ─────────────────────────────────────────────────────────────────────────────
-DOMAIN=${DOMAIN:-"retail"}
-MODEL=${MODEL:-"Qwen/Qwen2.5-1.5B-Instruct"}
+DOMAIN=${DOMAIN:-"airline"}
+MODEL=${MODEL:-"Qwen/Qwen2.5-7B-Instruct"}
 USER_SIM_MODEL=${USER_SIM_MODEL:-"Qwen/Qwen2.5-7B-Instruct"}
 USER_SIM_PORT=${USER_SIM_PORT:-8000}
-USER_SIM_GPU=${USER_SIM_GPU:-3}
+USER_SIM_GPU=${USER_SIM_GPU:-7}
 ENGINE=${ENGINE:-"vllm"}
 EVAL_ONLY=false
 EVAL_CHECKPOINT=""
@@ -45,14 +45,13 @@ while [[ $# -gt 0 ]]; do
             echo ""
             echo "Options:"
             echo "  --domain DOMAIN         tau2-bench domain (default: retail)"
-            echo "  --model MODEL           Base model (default: Qwen/Qwen2.5-1.5B-Instruct)"
+            echo "  --model MODEL           Base model (default: Qwen/Qwen2.5-7B-Instruct)"
             echo "  --eval-only CHECKPOINT  Only run evaluation on given checkpoint"
             echo ""
             echo "Environment variables:"
             echo "  DOMAIN, MODEL, USER_SIM_MODEL, USER_SIM_PORT, USER_SIM_GPU"
             echo "  ENGINE, EVAL_DOMAINS, NUM_TRIALS"
             echo "  HF_HOME, WANDB_API_KEY, WANDB_DIR, CUDA_VISIBLE_DEVICES"
-            exit 0
             ;;
         *) break ;;
     esac
@@ -133,8 +132,9 @@ run_tau2_eval() {
 if [ "$EVAL_ONLY" = true ]; then
     echo "[eval-only] Evaluating checkpoint: $EVAL_CHECKPOINT"
     run_tau2_eval "$EVAL_CHECKPOINT" "eval_only"
-    exit 0
 fi
+
+if [ "$EVAL_ONLY" = false ]; then
 
 # ─────────────────────────────────────────────────────────────────────────────
 # Step 1: Start user sim
@@ -149,7 +149,7 @@ echo "[step 2] Training solver agent on domain=$DOMAIN ..."
 
 DOMAIN=$DOMAIN \
 USER_SIM_URL=$USER_SIM_URL \
-USER_SIM_MODEL=$USER_SIM_MODEL \
+USER_SIM_MODEL=user_sim \
 MODEL=$MODEL \
 bash "$(dirname "$0")/run_tau2bench_solver.sh" "$ENGINE"
 
@@ -178,3 +178,5 @@ echo ""
 echo "================================================================"
 echo "  Done! Check W&B for training curves."
 echo "================================================================"
+
+fi # EVAL_ONLY=false
