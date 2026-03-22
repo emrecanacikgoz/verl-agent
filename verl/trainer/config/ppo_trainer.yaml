@@ -314,3 +314,16 @@ env:
   webshop:
     use_small: True
     human_goals: False
+  tau2bench:
+    domain: retail
+    user_sim_url: "http://localhost:8000/v1"
+    user_sim_model: "Qwen/Qwen2.5-3B-Instruct"
+    # Reward combination: weighted sum of tool-call accuracy + tau2-bench task success
+    # tool_call_reward: continuous [0,1] greedy F1 over tool name/arguments
+    # task_success_reward: binary [0,1] from tau2-bench DB + action + communicate evaluators
+    tool_call_reward_coef: 0.5
+    task_success_reward_coef: 0.5
+    # TOD-Zero self-play: path to JSON file with challenger-generated user goals.
+    # null = standard mode (use tau2-bench registry tasks).
+    # Set via: env.tau2bench.challenger_scenarios_path=/path/to/scenarios.json
+    challenger_scenarios_path: null
