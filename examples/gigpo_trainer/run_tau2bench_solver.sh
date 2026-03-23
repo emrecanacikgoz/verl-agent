@@ -16,7 +16,7 @@
 #
 # Start user simulator server:
 #   python -m vllm.entrypoints.openai.api_server \
-#       --model Qwen/Qwen2.5-7B-Instruct \
+#       --model Qwen/Qwen2.5-0.5B-Instruct \
 #       --port 8000 --tensor-parallel-size 1
 # ============================================================================
 
@@ -33,8 +33,8 @@ export WANDB_DIR=${WANDB_DIR:-}
 # ─────────────────────────────────────────────────────────────────────────────
 DOMAIN=${DOMAIN:-"retail"}                              # retail, airline, telecom
 USER_SIM_URL=${USER_SIM_URL:-"http://localhost:8000/v1"}
-USER_SIM_MODEL=${USER_SIM_MODEL:-"Qwen/Qwen2.5-7B-Instruct"}
-MODEL=${MODEL:-"Qwen/Qwen2.5-7B-Instruct"}
+USER_SIM_MODEL=${USER_SIM_MODEL:-"Qwen/Qwen2.5-0.5B-Instruct"}
+MODEL=${MODEL:-"Qwen/Qwen2.5-0.5B-Instruct"}
 # TOD-Zero self-play: path to challenger-generated scenarios JSON
 # null = standard mode (use tau2-bench registry tasks)
 CHALLENGER_SCENARIOS_PATH=${CHALLENGER_SCENARIOS_PATH:-null}
@@ -43,8 +43,8 @@ SOLVER_EPOCHS=${SOLVER_EPOCHS:-100}
 SOLVER_CKPT_DIR=${SOLVER_CKPT_DIR:-"checkpoints/verl_agent_tau2bench_${DOMAIN}"}
 
 num_cpus_per_env_worker=0.1
-train_data_size=28
-val_data_size=28
+train_data_size=24
+val_data_size=24
 group_size=4
 history_length=4
 max_steps=30
@@ -78,7 +78,7 @@ python3 -m verl.trainer.main_ppo \
     actor_rollout_ref.model.path=$MODEL \
     actor_rollout_ref.actor.optim.lr=1e-6 \
     actor_rollout_ref.model.use_remove_padding=True \
-    actor_rollout_ref.actor.ppo_mini_batch_size=28 \
+    actor_rollout_ref.actor.ppo_mini_batch_size=24 \
     actor_rollout_ref.actor.ppo_micro_batch_size_per_gpu=4 \
     actor_rollout_ref.actor.use_kl_loss=True \
     actor_rollout_ref.actor.kl_loss_coef=0.01 \
@@ -116,8 +116,8 @@ python3 -m verl.trainer.main_ppo \
     trainer.critic_warmup=0 \
     trainer.logger=['console','wandb'] \
     trainer.project_name="verl_agent_tau2bench_${DOMAIN}" \
-    trainer.experiment_name="grpo_qwen2.5_7b_${DOMAIN}" \
-    trainer.n_gpus_per_node=${N_GPUS_PER_NODE:-7} \
+    trainer.experiment_name="grpo_qwen2.5_0.5b_${DOMAIN}" \
+    trainer.n_gpus_per_node=${N_GPUS_PER_NODE:-4} \
     trainer.nnodes=1 \
     trainer.save_freq=10 \
     trainer.test_freq=5 \

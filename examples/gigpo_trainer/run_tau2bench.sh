@@ -11,7 +11,7 @@
 #   bash run_tau2bench.sh --eval-only /path/to/checkpoint  # eval only
 #
 # Requirements:
-#   - 8x GPUs (6 for training, 1 for user sim vLLM server)
+#   - 4x GPUs (3 for training, 1 for user sim vLLM server)
 #   - tau2-bench: pip install git+https://github.com/emrecanacikgoz/tau2-bench.git
 #   - verl-agent: pip install -e . (from repo root)
 # ============================================================================
@@ -22,10 +22,10 @@ set -euo pipefail
 # Configuration
 # ─────────────────────────────────────────────────────────────────────────────
 DOMAIN=${DOMAIN:-"airline"}
-MODEL=${MODEL:-"Qwen/Qwen2.5-7B-Instruct"}
-USER_SIM_MODEL=${USER_SIM_MODEL:-"Qwen/Qwen2.5-7B-Instruct"}
+MODEL=${MODEL:-"Qwen/Qwen2.5-0.5B-Instruct"}
+USER_SIM_MODEL=${USER_SIM_MODEL:-"Qwen/Qwen2.5-0.5B-Instruct"}
 USER_SIM_PORT=${USER_SIM_PORT:-8000}
-USER_SIM_GPU=${USER_SIM_GPU:-7}
+USER_SIM_GPU=${USER_SIM_GPU:-3}
 ENGINE=${ENGINE:-"vllm"}
 EVAL_ONLY=false
 EVAL_CHECKPOINT=""
@@ -45,7 +45,7 @@ while [[ $# -gt 0 ]]; do
             echo ""
             echo "Options:"
             echo "  --domain DOMAIN         tau2-bench domain (default: retail)"
-            echo "  --model MODEL           Base model (default: Qwen/Qwen2.5-7B-Instruct)"
+            echo "  --model MODEL           Base model (default: Qwen/Qwen2.5-0.5B-Instruct)"
             echo "  --eval-only CHECKPOINT  Only run evaluation on given checkpoint"
             echo ""
             echo "Environment variables:"

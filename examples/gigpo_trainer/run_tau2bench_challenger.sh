@@ -26,7 +26,7 @@ export WANDB_DIR=${WANDB_DIR:-}
 # Configuration
 # ─────────────────────────────────────────────────────────────────────────────
 DOMAIN=${DOMAIN:-"retail"}
-MODEL=${MODEL:-"Qwen/Qwen2.5-7B-Instruct"}
+MODEL=${MODEL:-"Qwen/Qwen2.5-0.5B-Instruct"}
 # Self-play: override training duration and checkpoint directory via env vars
 CHALLENGER_EPOCHS=${CHALLENGER_EPOCHS:-100}
 CHALLENGER_CKPT_DIR=${CHALLENGER_CKPT_DIR:-"checkpoints/verl_agent_tau2bench_challenger_${DOMAIN}"}
@@ -91,8 +91,8 @@ python3 -m verl.trainer.main_ppo \
     trainer.critic_warmup=0 \
     trainer.logger=['console','wandb'] \
     trainer.project_name="verl_agent_tau2bench_challenger_${DOMAIN}" \
-    trainer.experiment_name="gigpo_qwen2.5_7b_challenger_${DOMAIN}" \
-    trainer.n_gpus_per_node=${N_GPUS_PER_NODE:-8} \
+    trainer.experiment_name="gigpo_qwen2.5_0.5b_challenger_${DOMAIN}" \
+    trainer.n_gpus_per_node=${N_GPUS_PER_NODE:-4} \
     trainer.nnodes=1 \
     trainer.save_freq=10 \
     trainer.test_freq=5 \
