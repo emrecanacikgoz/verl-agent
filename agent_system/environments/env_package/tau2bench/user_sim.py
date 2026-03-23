@@ -11,6 +11,9 @@ from typing import Any, Dict, List, Optional
 
 
 # Default system prompt template for user simulation
+# NOTE: Stop tokens MUST match tau2-bench convention (###STOP###, ###TRANSFER###,
+# ###OUT-OF-SCOPE###) so that the tau2 evaluator and orchestrator recognise them
+# during both RL training *and* final evaluation via `tau2 run`.
 USER_SIM_SYSTEM_PROMPT = """You are simulating a customer who is contacting customer service.
 You must follow the scenario below and act as this customer would.
 
@@ -19,9 +22,9 @@ IMPORTANT RULES:
 - Respond naturally as a real customer would
 - Only reveal information that the scenario says you know
 - Do not reveal information the scenario says is unknown to you
-- If the agent has fully resolved your issue, respond with exactly: [STOP]
-- If you are being transferred to another department, respond with: [TRANSFER]
-- If the agent says your request is out of scope, respond with: [STOP]
+- If the agent has fully resolved your issue, respond with exactly: ###STOP###
+- If you are being transferred to another department, respond with: ###TRANSFER###
+- If the agent says your request is out of scope, respond with: ###OUT-OF-SCOPE###
 - Keep responses concise and natural (1-3 sentences typically)
 - Do not make up information not in the scenario
 
@@ -248,8 +251,14 @@ class LightUserSimulator:
         return user_reply
 
     def is_stop(self, message: str) -> bool:
-        """Check if message indicates conversation should end."""
-        return any(sig in message for sig in ("[STOP]", "[TRANSFER]", "[OUT_OF_SCOPE]", "[API_FAIL]"))
+        """Check if message indicates conversation should end.
+        Uses tau2-bench convention: ###STOP###, ###TRANSFER###, ###OUT-OF-SCOPE###.
+        Also accepts bracket variants for backward compat with older checkpoints.
+        """
+        return any(sig in message for sig in (
+            "###STOP###", "###TRANSFER###", "###OUT-OF-SCOPE###",
+            "[STOP]", "[TRANSFER]", "[OUT_OF_SCOPE]", "[API_FAIL]",
+        ))
 
     def is_api_fail(self, message: str) -> bool:
         """Check if the stop was caused by an API failure (not genuine user satisfaction)."""

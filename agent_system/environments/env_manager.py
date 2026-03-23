@@ -873,6 +873,8 @@ def make_envs(config):
         task_success_reward_coef = getattr(tau2_cfg, "task_success_reward_coef", 0.5)
         # TOD-Zero: optional path to challenger-generated user goals
         challenger_scenarios_path = getattr(tau2_cfg, "challenger_scenarios_path", None)
+        # Conversation logging for debugging (set env.tau2bench.conv_log_dir to enable)
+        conv_log_dir = getattr(tau2_cfg, "conv_log_dir", None)
         _envs = build_tau2bench_solver_envs(
             domain=tau2_cfg.domain,
             user_sim_url=tau2_cfg.user_sim_url,
@@ -884,6 +886,7 @@ def make_envs(config):
             tool_call_reward_coef=tool_call_reward_coef,
             task_success_reward_coef=task_success_reward_coef,
             challenger_scenarios_path=challenger_scenarios_path,
+            conv_log_dir=conv_log_dir,
         )
         _val_envs = build_tau2bench_solver_envs(
             domain=tau2_cfg.domain,
@@ -896,6 +899,7 @@ def make_envs(config):
             tool_call_reward_coef=tool_call_reward_coef,
             task_success_reward_coef=task_success_reward_coef,
             # val always uses registry tasks for clean evaluation
+            conv_log_dir=conv_log_dir,
         )
         projection_f = partial(solver_projection)
         envs = Tau2BenchSolverEnvironmentManager(_envs, projection_f, config)

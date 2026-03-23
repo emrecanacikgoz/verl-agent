@@ -503,13 +503,14 @@ def compute_combined_reward(
 def compute_synthetic_reward(
     termination_reason: Any,
     tool_calls_made: List[Dict[str, Any]],
-    completion_coef: float = 0.7,
-    tool_usage_coef: float = 0.3,
+    expected_actions: Optional[List[Dict[str, Any]]] = None,
+    completion_coef: float = 0.4,
+    tool_usage_coef: float = 0.1,
+    action_match_coef: float = 0.5,
 ) -> Tuple[float, Dict]:
     """Reward for solver trained on challenger-generated scenarios.
 
     Used when no ground-truth evaluation criteria exist (synthetic tasks).
-    Signal comes entirely from user simulator satisfaction and tool usage.
 
     Components:
       R_completion (0.0-1.0): did the user simulator signal task completion?
@@ -518,15 +519,19 @@ def compute_synthetic_reward(
         - timeout    → 0.0  (no resolution)
       R_tool_usage (0.0-1.0): did the agent make successful API calls?
         - min(1.0, n_successful_calls / 2)
+      R_action_match (0.0-1.0): how well do solver's tool calls match
+        the challenger's expected actions? Uses the same greedy F1 scoring
+        as the standard solver reward.
+
+    When expected_actions is empty (legacy scenarios without actions),
+    falls back to completion + tool_usage only.
 
     Returns:
         (reward ∈ [0, 1], diagnostics dict)
     """
-    # --- R_completion ---
-    # Compare directly against enum values to avoid Python-version-dependent str() behavior.
-    # TerminationReason(str, Enum) has lowercase values ("user_stop"), so string-based
-    # uppercase checks ("USER_STOP" in str(...)) fail in Python 3.12.
     from tau2.data_model.simulation import TerminationReason
+
+    # --- R_completion ---
     if termination_reason == TerminationReason.USER_STOP:
         r_completion = 1.0
     elif termination_reason == TerminationReason.AGENT_STOP:
@@ -538,13 +543,42 @@ def compute_synthetic_reward(
     n_calls = len(tool_calls_made)
     r_tool = min(1.0, n_calls / 2.0)
 
-    combined = completion_coef * r_completion + tool_usage_coef * r_tool
+    # --- R_action_match: compare with challenger's expected actions ---
+    r_action = 0.0
+    action_diagnostics = {}
+    if expected_actions and len(expected_actions) > 0:
+        # Normalize expected actions to the same format as tool_calls_made
+        gt_calls = []
+        for a in expected_actions:
+            if isinstance(a, dict) and "name" in a:
+                gt_calls.append({
+                    "name": a.get("name", ""),
+                    "arguments": a.get("arguments", {}),
+                })
+        if gt_calls:
+            r_action, action_diagnostics = compute_solver_accuracy(
+                predicted_calls=tool_calls_made,
+                ground_truth_calls=gt_calls,
+            )
+        # With action matching available, use full 3-component weighting
+        combined = (
+            completion_coef * r_completion
+            + tool_usage_coef * r_tool
+            + action_match_coef * r_action
+        )
+    else:
+        # No expected actions — fall back to completion + tool_usage only
+        combined = 0.7 * r_completion + 0.3 * r_tool
+
     diagnostics = {
         "synthetic_mode": True,
         "termination_reason": str(termination_reason),
         "completion_reward": r_completion,
         "tool_usage_reward": r_tool,
+        "action_match_reward": r_action,
         "n_successful_tool_calls": n_calls,
+        "n_expected_actions": len(expected_actions) if expected_actions else 0,
+        "action_match_diagnostics": action_diagnostics,
         "combined_reward": float(combined),
     }
     return float(max(0.0, min(1.0, combined))), diagnostics

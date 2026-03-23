@@ -43,7 +43,8 @@ class _SolverWorker:
         seed: int = 0,
         tool_call_reward_coef: float = 0.5,
         task_success_reward_coef: float = 0.5,
-        external_scenarios: Optional[List[str]] = None,
+        external_scenarios: Optional[List[Dict]] = None,
+        conv_log_dir: Optional[str] = None,
     ):
         self.domain = domain
         self.user_sim_url = user_sim_url
@@ -54,6 +55,14 @@ class _SolverWorker:
         # TOD-Zero: challenger-generated user goals (None = use registry tasks)
         self.external_scenarios = external_scenarios
         self.synthetic_mode = external_scenarios is not None and len(external_scenarios) > 0
+
+        # Conversation logger for post-training debugging
+        from agent_system.environments.env_package.tau2bench.conv_logger import ConversationLogger
+        self.conv_logger = ConversationLogger(
+            log_dir=conv_log_dir or "./conv_logs",
+            enabled=conv_log_dir is not None,
+            sample_rate=1.0,  # log every episode
+        )
 
         # Load domain from tau2-bench registry
         from tau2.registry import registry
@@ -71,6 +80,8 @@ class _SolverWorker:
         self.message_history: list = []
         self._tool_call_counter: int = 0
         self._termination_reason = None
+        # Challenger expected actions for synthetic reward (set on reset)
+        self._expected_actions: List[Dict] = []
 
         # Verify user sim server is reachable before starting any rollouts
         from agent_system.environments.env_package.tau2bench.user_sim import (
@@ -149,9 +160,16 @@ class _SolverWorker:
         if self.synthetic_mode:
             # TOD-Zero: sample a challenger-generated user goal
             goal_idx = self.rng.randint(0, len(self.external_scenarios))
-            user_instructions = self.external_scenarios[goal_idx]
+            scenario = self.external_scenarios[goal_idx]
+            if isinstance(scenario, dict):
+                user_instructions = scenario.get("instructions", "")
+                self._expected_actions = scenario.get("actions", [])
+            else:
+                user_instructions = str(scenario)
+                self._expected_actions = []
         else:
             user_instructions = str(self.task.user_scenario.instructions)
+            self._expected_actions = []
 
         # Reset user simulator with the scenario instructions
         self.user_sim.reset(user_instructions)
@@ -159,6 +177,22 @@ class _SolverWorker:
         # Generate first user message and record it
         first_msg = self.user_sim.generate_first_message()
         self.message_history.append(TauUserMessage(role="user", content=first_msg))
+
+        # Start conversation logging
+        import uuid as _uuid
+        self._episode_id = str(_uuid.uuid4())[:8]
+        self._user_instructions = user_instructions
+        self._last_obs = first_msg  # track what the agent will see next
+        self.conv_logger.start_episode(
+            episode_id=self._episode_id,
+            task_id=self.task.id,
+            domain=self.domain,
+            synthetic_mode=self.synthetic_mode,
+            user_instructions=user_instructions,
+            expected_actions=self._expected_actions,
+            policy_snippet=self.policy[:500],
+            tool_names=[t.get("name", "") for t in self.tool_schemas[:20]],
+        )
 
         info = {
             "task_id": self.task.id,
@@ -179,21 +213,68 @@ class _SolverWorker:
         """
         self.step_count += 1
         action_type = parsed_action.get("type", "invalid")
+        agent_obs = getattr(self, '_last_obs', '')  # what the agent saw this turn
 
         if action_type == "tool_call":
-            return self._handle_tool_calls(parsed_action["calls"])
-        elif action_type == "response":
-            return self._handle_response(parsed_action["content"])
-        elif action_type == "stop":
-            return self._handle_stop(parsed_action.get("content", ""))
-        else:
-            # Invalid action
-            return (
-                "Error: Could not parse your response. Use <tool_call> or <response> tags.",
-                0.0,
-                False,
-                {"is_action_valid": 0, "action_type": "invalid"},
+            obs, reward, done, info = self._handle_tool_calls(parsed_action["calls"])
+            # Log turn
+            self.conv_logger.log_turn(
+                turn_number=self.step_count,
+                agent_input_observation=agent_obs,
+                agent_raw_output=f"[tool_call] {json.dumps(parsed_action['calls'], default=str)[:500]}",
+                parsed_action_type="tool_call",
+                tool_calls=parsed_action["calls"],
+                tool_results=[
+                    {"name": tc.get("name", ""), "result": r, "error": False}
+                    for tc, r in zip(parsed_action["calls"], obs.split("\n"))
+                ] if obs else [],
+                is_done=done,
+                step_reward=reward,
             )
+            self._last_obs = obs
+            return obs, reward, done, info
+
+        elif action_type == "response":
+            obs, reward, done, info = self._handle_response(parsed_action["content"])
+            self.conv_logger.log_turn(
+                turn_number=self.step_count,
+                agent_input_observation=agent_obs,
+                agent_raw_output=parsed_action["content"],
+                parsed_action_type="response",
+                parsed_action_detail=parsed_action["content"],
+                user_sim_reply=obs,
+                is_done=done,
+                step_reward=reward,
+            )
+            self._last_obs = obs
+            return obs, reward, done, info
+
+        elif action_type == "stop":
+            obs, reward, done, info = self._handle_stop(parsed_action.get("content", ""))
+            self.conv_logger.log_turn(
+                turn_number=self.step_count,
+                agent_input_observation=agent_obs,
+                agent_raw_output=parsed_action.get("content", "[STOP]"),
+                parsed_action_type="stop",
+                parsed_action_detail=parsed_action.get("content", ""),
+                is_done=True,
+                step_reward=reward,
+            )
+            self._last_obs = ""
+            return obs, reward, done, info
+
+        else:
+            obs = "Error: Could not parse your response. Use <tool_call> or <response> tags."
+            self.conv_logger.log_turn(
+                turn_number=self.step_count,
+                agent_input_observation=agent_obs,
+                agent_raw_output=parsed_action.get("raw", "[unparseable]")[:500],
+                parsed_action_type="invalid",
+                is_done=False,
+                step_reward=0.0,
+            )
+            self._last_obs = obs
+            return (obs, 0.0, False, {"is_action_valid": 0, "action_type": "invalid"})
 
     def _handle_tool_calls(self, calls: List[Dict]) -> Tuple[str, float, bool, Dict]:
         """Execute tool calls via tau2-bench environment."""
@@ -279,13 +360,27 @@ class _SolverWorker:
         if self.user_sim.is_stop(user_reply):
             if self.user_sim.is_api_fail(user_reply):
                 # API failure forced the stop — don't credit as user satisfaction.
-                self._termination_reason = None
+                # Use TOO_MANY_ERRORS so the tau2 evaluator gives 0 reward
+                # (TerminationReason is a required enum; None would crash SimulationRun).
+                self._termination_reason = TerminationReason.TOO_MANY_ERRORS
+                self.conv_logger.end_episode(
+                    final_reward=0.0,
+                    termination_reason="api_fail",
+                    diagnostics={"api_fail": True},
+                    tool_calls_made=self.tool_calls_made,
+                )
+                return user_reply, 0.0, True, {
+                    "won": False,
+                    "action_type": "api_fail",
+                    "reward_diagnostics": {"api_fail": True},
+                    "is_action_valid": 1,
+                }
             else:
                 self._termination_reason = TerminationReason.USER_STOP
             reward, diagnostics = self._compute_final_reward()
             return user_reply, reward, True, {
                 "won": reward >= 0.99,
-                "action_type": "user_stop" if not self.user_sim.is_api_fail(user_reply) else "api_fail",
+                "action_type": "user_stop",
                 "reward_diagnostics": diagnostics,
                 "is_action_valid": 1,
             }
@@ -308,26 +403,38 @@ class _SolverWorker:
     def _compute_final_reward(self) -> Tuple[float, Dict]:
         """Compute reward at episode end.
 
-        TOD-Zero (synthetic mode): uses user satisfaction + tool usage signal.
+        TOD-Zero (synthetic mode): uses user satisfaction + tool usage signal
+        + pseudo-ground-truth action matching from challenger's expected actions.
         Standard mode: uses tool-call accuracy + tau2-bench task success.
         """
         if self.synthetic_mode:
             from agent_system.environments.env_package.tau2bench.rewards import compute_synthetic_reward
-            return compute_synthetic_reward(
+            reward, diagnostics = compute_synthetic_reward(
                 termination_reason=self._termination_reason,
                 tool_calls_made=self.tool_calls_made,
+                expected_actions=getattr(self, '_expected_actions', []),
             )
-        from agent_system.environments.env_package.tau2bench.rewards import compute_combined_reward
-        reward, diagnostics = compute_combined_reward(
-            env_constructor=self.env_constructor,
-            task=self.task,
+        else:
+            from agent_system.environments.env_package.tau2bench.rewards import compute_combined_reward
+            reward, diagnostics = compute_combined_reward(
+                env_constructor=self.env_constructor,
+                task=self.task,
+                tool_calls_made=self.tool_calls_made,
+                message_history=self.message_history,
+                domain=self.domain,
+                termination_reason=self._termination_reason,
+                tool_call_reward_coef=self.tool_call_reward_coef,
+                task_success_reward_coef=self.task_success_reward_coef,
+            )
+
+        # Finalize conversation log
+        self.conv_logger.end_episode(
+            final_reward=reward,
+            termination_reason=str(self._termination_reason) if self._termination_reason else "unknown",
+            diagnostics=diagnostics,
             tool_calls_made=self.tool_calls_made,
-            message_history=self.message_history,
-            domain=self.domain,
-            termination_reason=self._termination_reason,
-            tool_call_reward_coef=self.tool_call_reward_coef,
-            task_success_reward_coef=self.task_success_reward_coef,
         )
+
         return reward, diagnostics
 
 
@@ -424,7 +531,8 @@ class Tau2BenchSolverEnvs(gym.Env):
         is_train: bool = True,
         tool_call_reward_coef: float = 0.5,
         task_success_reward_coef: float = 0.5,
-        external_scenarios: Optional[List[str]] = None,
+        external_scenarios: Optional[List[Dict]] = None,
+        conv_log_dir: Optional[str] = None,
     ):
         super().__init__()
         self.env_num = env_num
@@ -441,6 +549,7 @@ class Tau2BenchSolverEnvs(gym.Env):
                 tool_call_reward_coef=tool_call_reward_coef,
                 task_success_reward_coef=task_success_reward_coef,
                 external_scenarios=external_scenarios,
+                conv_log_dir=conv_log_dir,
             )
             for i in range(self.batch_size)
         ]
@@ -584,6 +693,7 @@ def build_tau2bench_solver_envs(
     tool_call_reward_coef: float = 0.5,
     task_success_reward_coef: float = 0.5,
     challenger_scenarios_path: Optional[str] = None,
+    conv_log_dir: Optional[str] = None,
     **kwargs,
 ) -> Tau2BenchSolverEnvs:
     """Build tau2-bench solver environments.
@@ -591,6 +701,8 @@ def build_tau2bench_solver_envs(
     Args:
         challenger_scenarios_path: path to JSON file with challenger-generated
             user goals. If provided, activates TOD-Zero synthetic training mode.
+        conv_log_dir: if set, logs sampled episode conversations to this directory
+            as JSON files for post-training debugging.
     """
     external_scenarios = None
     if challenger_scenarios_path:
@@ -598,18 +710,19 @@ def build_tau2bench_solver_envs(
         if os.path.exists(challenger_scenarios_path):
             with open(challenger_scenarios_path, "r") as f:
                 data = json.load(f)
-            # Accept list of strings, dicts with "instructions" key (new format),
-            # or dicts with legacy "goal" key
+            # Keep full scenario dicts so solver can use expected actions as
+            # pseudo-ground-truth for richer reward in synthetic mode.
+            # Format: [{"instructions": str, "actions": [{"name":..., "arguments":...}]}, ...]
             if isinstance(data, list):
                 external_scenarios = []
                 for item in data:
                     if isinstance(item, str) and item.strip():
-                        external_scenarios.append(item)
+                        external_scenarios.append({"instructions": item, "actions": []})
                     elif isinstance(item, dict):
-                        # New format: "instructions" field
                         instr = item.get("instructions", "") or item.get("goal", "")
+                        actions = item.get("actions", [])
                         if instr.strip():
-                            external_scenarios.append(instr)
+                            external_scenarios.append({"instructions": instr, "actions": actions})
             print(f"[Tau2Solver] Loaded {len(external_scenarios)} challenger scenarios from {challenger_scenarios_path}")
         else:
             print(f"[Tau2Solver] Warning: challenger_scenarios_path not found: {challenger_scenarios_path}")
@@ -625,6 +738,7 @@ def build_tau2bench_solver_envs(
         tool_call_reward_coef=tool_call_reward_coef,
         task_success_reward_coef=task_success_reward_coef,
         external_scenarios=external_scenarios,
+        conv_log_dir=conv_log_dir,
     )
 
 

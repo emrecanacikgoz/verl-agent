@@ -91,8 +91,11 @@ def solver_projection(actions: List[str]) -> Tuple[List[Dict], List[int]]:
 
         if response_matches:
             text = response_matches[-1].strip()
-            # Check for stop/transfer signals
-            if any(sig in text for sig in ("[STOP]", "[TRANSFER]", "[OUT_OF_SCOPE]")):
+            # Check for stop/transfer signals (both tau2-bench and legacy formats)
+            if any(sig in text for sig in (
+                "###STOP###", "###TRANSFER###", "###OUT-OF-SCOPE###",
+                "[STOP]", "[TRANSFER]", "[OUT_OF_SCOPE]",
+            )):
                 results.append({"type": "stop", "content": text})
                 valids.append(1)
             else:
