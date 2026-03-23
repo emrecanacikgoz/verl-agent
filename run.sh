@@ -18,7 +18,7 @@
 # ─────────────────────────────────────────────────────────────────────────────
 source /shared/storage-01/setenv.sh
 # Base model used to initialize Challenger, Solver, and User Simulator
-BASE_MODEL=${BASE_MODEL:-"Qwen/Qwen2.5-3B-Instruct"}
+BASE_MODEL=${BASE_MODEL:-"Qwen/Qwen2.5-0.5B-Instruct"}
 
 # tau2-bench domain: retail | airline | telecom
 DOMAIN=${DOMAIN:-"airline"}
@@ -34,10 +34,10 @@ CHALLENGER_EPOCHS=${CHALLENGER_EPOCHS:-30}   # epochs to train the challenger
 SOLVER_EPOCHS=${SOLVER_EPOCHS:-50}           # epochs to train the solver
 
 # User simulator — fixed throughout, never trained
-# GPU 7 is reserved for user sim; solver uses GPUs 0-6
+# GPU 3 is reserved for user sim; solver uses GPUs 0-2
 USER_SIM_MODEL=${USER_SIM_MODEL:-"$BASE_MODEL"}
 USER_SIM_PORT=${USER_SIM_PORT:-8000}
-USER_SIM_GPU=7
+USER_SIM_GPU=3
 
 # W&B
 export WANDB_PROJECT=${WANDB_PROJECT:-"tod-zero-${DOMAIN}"}
