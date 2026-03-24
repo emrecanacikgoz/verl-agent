@@ -1,4 +1,5 @@
-
+tod_zero_airline/*
+tod_zero_airline*/
 **/*.pt
 **/checkpoints
 **/wget-log

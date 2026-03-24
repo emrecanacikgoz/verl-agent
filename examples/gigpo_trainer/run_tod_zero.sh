@@ -250,17 +250,72 @@ echo "  Final solver: $SOLVER_PREV"
 
 EVAL_DOMAINS=${EVAL_DOMAINS:-"retail airline"}
 NUM_TRIALS=${NUM_TRIALS:-5}
+EVAL_PORT=${EVAL_PORT:-8001}
+
+# Start vLLM server with final solver model for tau2 evaluation
+# (tau2-bench uses litellm which needs an OpenAI-compatible API)
+echo "[eval] Starting solver vLLM server on port $EVAL_PORT..."
+pkill -f "vllm.entrypoints.openai.api_server.*--port ${EVAL_PORT}" 2>/dev/null || true
+sleep 2
+
+CUDA_VISIBLE_DEVICES=0 python -m vllm.entrypoints.openai.api_server \
+    --model "$SOLVER_PREV" \
+    --served-model-name solver_eval \
+    --port "$EVAL_PORT" \
+    --enforce-eager \
+    --tensor-parallel-size 1 > "${BASE_DIR}/eval_server.log" 2>&1 &
+
+echo "[eval] Waiting for solver server..."
+for i in $(seq 1 60); do
+    if curl -s "http://localhost:${EVAL_PORT}/health" > /dev/null 2>&1; then
+        echo "[eval] Solver server ready!"
+        break
+    fi
+    sleep 5
+done
+
+# Start user simulator for evaluation (strong model if available, else base)
+EVAL_USER_SIM_MODEL=${EVAL_USER_SIM_MODEL:-"$USER_SIM_MODEL"}
+EVAL_USER_SIM_PORT=${EVAL_USER_SIM_PORT:-8002}
+echo "[eval] Starting user sim server on port $EVAL_USER_SIM_PORT..."
+start_user_sim_eval() {
+    pkill -f "vllm.entrypoints.openai.api_server.*--port ${EVAL_USER_SIM_PORT}" 2>/dev/null || true
+    sleep 2
+    CUDA_VISIBLE_DEVICES=1 python -m vllm.entrypoints.openai.api_server \
+        --model "$EVAL_USER_SIM_MODEL" \
+        --served-model-name eval_user_sim \
+        --port "$EVAL_USER_SIM_PORT" \
+        --enforce-eager \
+        --tensor-parallel-size 1 > "${BASE_DIR}/eval_user_sim.log" 2>&1 &
+    for i in $(seq 1 60); do
+        if curl -s "http://localhost:${EVAL_USER_SIM_PORT}/health" > /dev/null 2>&1; then
+            echo "[eval] User sim server ready!"
+            return 0
+        fi
+        sleep 5
+    done
+    echo "[eval] WARNING: User sim server failed to start"
+    return 1
+}
+start_user_sim_eval
 
 for domain in $EVAL_DOMAINS; do
     echo "[eval] tau2-bench evaluation on domain=$domain ..."
     tau2 run \
         --domain "$domain" \
-        --agent-llm "$SOLVER_PREV" \
+        --agent-llm "openai/solver_eval" \
+        --agent-llm-args "{\"temperature\": 0.3, \"api_base\": \"http://localhost:${EVAL_PORT}/v1\"}" \
+        --user-llm "openai/eval_user_sim" \
+        --user-llm-args "{\"temperature\": 0.7, \"api_base\": \"http://localhost:${EVAL_USER_SIM_PORT}/v1\"}" \
         --num-trials "$NUM_TRIALS" \
         --task-split-name test \
         --save-to "${BASE_DIR}/eval_final_${domain}.json" \
         2>&1 || echo "[eval] WARNING: $domain evaluation failed (non-fatal)"
 done
+
+# Cleanup eval servers
+pkill -f "vllm.entrypoints.openai.api_server.*--port ${EVAL_PORT}" 2>/dev/null || true
+pkill -f "vllm.entrypoints.openai.api_server.*--port ${EVAL_USER_SIM_PORT}" 2>/dev/null || true
 
 echo ""
 echo "================================================================"
