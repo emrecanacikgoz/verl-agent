@@ -12,8 +12,7 @@ TAU2BENCH_SOLVER_SYSTEM = """You are a helpful customer service agent for the {d
 {policy}
 
 ## Available Tools
-You have access to the following tools:
-{tool_schemas}
+{tool_signatures}
 
 ## Output Format
 At each step, you will receive either a user message or tool execution results.
@@ -46,7 +45,7 @@ Now respond with your reasoning and action."""
 
 TAU2BENCH_SOLVER_TEMPLATE = """{system_prompt}
 
-You have completed {step_count} step(s) so far. Below is the recent interaction history (last {history_length} steps):
+Conversation so far ({step_count} turns):
 {action_history}
 
 Current message:

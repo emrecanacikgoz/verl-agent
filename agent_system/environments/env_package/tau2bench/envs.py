@@ -45,6 +45,8 @@ class _SolverWorker:
         task_success_reward_coef: float = 0.5,
         external_scenarios: Optional[List[Dict]] = None,
         conv_log_dir: Optional[str] = None,
+        task_split: Optional[str] = "base",
+        max_steps: int = 30,
     ):
         self.domain = domain
         self.user_sim_url = user_sim_url
@@ -52,6 +54,7 @@ class _SolverWorker:
         self.tool_call_reward_coef = tool_call_reward_coef
         self.task_success_reward_coef = task_success_reward_coef
         self.rng = np.random.RandomState(seed)
+        self.max_steps = max_steps
         # TOD-Zero: challenger-generated user goals (None = use registry tasks)
         self.external_scenarios = external_scenarios
         self.synthetic_mode = external_scenarios is not None and len(external_scenarios) > 0
@@ -61,13 +64,13 @@ class _SolverWorker:
         self.conv_logger = ConversationLogger(
             log_dir=conv_log_dir or "./conv_logs",
             enabled=conv_log_dir is not None,
-            sample_rate=1.0,  # log every episode
+            sample_rate=0.05,  # log 5% of episodes to limit I/O
         )
 
         # Load domain from tau2-bench registry
         from tau2.registry import registry
         self.env_constructor = registry.get_env_constructor(domain)
-        self.tasks = registry.get_tasks_loader(domain)()
+        self.tasks = registry.get_tasks_loader(domain)(task_split)
 
         # Runtime state
         self.env = None
@@ -232,7 +235,6 @@ class _SolverWorker:
                 step_reward=reward,
             )
             self._last_obs = obs
-            return obs, reward, done, info
 
         elif action_type == "response":
             obs, reward, done, info = self._handle_response(parsed_action["content"])
@@ -247,7 +249,6 @@ class _SolverWorker:
                 step_reward=reward,
             )
             self._last_obs = obs
-            return obs, reward, done, info
 
         elif action_type == "stop":
             obs, reward, done, info = self._handle_stop(parsed_action.get("content", ""))
@@ -261,7 +262,6 @@ class _SolverWorker:
                 step_reward=reward,
             )
             self._last_obs = ""
-            return obs, reward, done, info
 
         else:
             obs = "Error: Could not parse your response. Use <tool_call> or <response> tags."
@@ -274,7 +274,27 @@ class _SolverWorker:
                 step_reward=0.0,
             )
             self._last_obs = obs
-            return (obs, 0.0, False, {"is_action_valid": 0, "action_type": "invalid"})
+            obs, reward, done, info = (obs, 0.0, False, {"is_action_valid": 0, "action_type": "invalid"})
+
+        # H3 fix: Force termination with final reward if max_steps reached
+        if not done and self.step_count >= self.max_steps:
+            from tau2.data_model.simulation import TerminationReason
+            self._termination_reason = TerminationReason.MAX_STEPS
+            timeout_reward, timeout_diag = self._compute_final_reward()
+            self.conv_logger.end_episode(
+                final_reward=timeout_reward,
+                termination_reason="max_steps",
+                diagnostics=timeout_diag,
+                tool_calls_made=self.tool_calls_made,
+            )
+            return obs, timeout_reward, True, {
+                "won": timeout_reward >= 0.99,
+                "action_type": "max_steps_timeout",
+                "reward_diagnostics": timeout_diag,
+                "is_action_valid": info.get("is_action_valid", 1),
+            }
+
+        return obs, reward, done, info
 
     def _handle_tool_calls(self, calls: List[Dict]) -> Tuple[str, float, bool, Dict]:
         """Execute tool calls via tau2-bench environment."""
@@ -533,6 +553,8 @@ class Tau2BenchSolverEnvs(gym.Env):
         task_success_reward_coef: float = 0.5,
         external_scenarios: Optional[List[Dict]] = None,
         conv_log_dir: Optional[str] = None,
+        task_split: Optional[str] = "base",
+        max_steps: int = 30,
     ):
         super().__init__()
         self.env_num = env_num
@@ -550,6 +572,8 @@ class Tau2BenchSolverEnvs(gym.Env):
                 task_success_reward_coef=task_success_reward_coef,
                 external_scenarios=external_scenarios,
                 conv_log_dir=conv_log_dir,
+                task_split=task_split,
+                max_steps=max_steps,
             )
             for i in range(self.batch_size)
         ]
@@ -694,6 +718,8 @@ def build_tau2bench_solver_envs(
     task_success_reward_coef: float = 0.5,
     challenger_scenarios_path: Optional[str] = None,
     conv_log_dir: Optional[str] = None,
+    task_split: Optional[str] = "base",
+    max_steps: int = 30,
     **kwargs,
 ) -> Tau2BenchSolverEnvs:
     """Build tau2-bench solver environments.
@@ -703,6 +729,10 @@ def build_tau2bench_solver_envs(
             user goals. If provided, activates TOD-Zero synthetic training mode.
         conv_log_dir: if set, logs sampled episode conversations to this directory
             as JSON files for post-training debugging.
+        task_split: which task split to load from registry ("train", "test", "base").
+            Training envs should use "train" or None (synthetic mode ignores this).
+            Val envs should use "test".
+        max_steps: maximum conversation turns before forced termination.
     """
     external_scenarios = None
     if challenger_scenarios_path:
@@ -739,6 +769,8 @@ def build_tau2bench_solver_envs(
         task_success_reward_coef=task_success_reward_coef,
         external_scenarios=external_scenarios,
         conv_log_dir=conv_log_dir,
+        task_split=task_split,
+        max_steps=max_steps,
     )
 
 

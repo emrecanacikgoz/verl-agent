@@ -371,6 +371,85 @@ def compute_challenger_reward(
 # Task success reward (tau2-bench native evaluator)
 # ===================================================================
 
+def _sanitize_trajectory_for_evaluator(messages: list) -> list:
+    """Remove error tool calls from message history to prevent evaluator replay failures.
+
+    The tau2-bench evaluator (EnvironmentEvaluator) replays all tool calls from
+    the trajectory via set_state(). If a tool call errored during the episode,
+    the error message string (e.g. "Error: user_id not found") may not be
+    exactly reproducible on replay, causing set_state to raise ValueError and
+    the entire evaluation to silently return 0.
+
+    Fix: strip error tool calls (which by definition didn't change DB state)
+    from the trajectory before feeding it to the evaluator. The evaluator only
+    needs successful calls to reconstruct the final environment state.
+    """
+    from copy import deepcopy
+    from tau2.data_model.message import (
+        AssistantMessage, UserMessage, ToolMessage,
+    )
+
+    sanitized = []
+    i = 0
+    while i < len(messages):
+        msg = messages[i]
+
+        # Non-tool-call messages pass through unchanged
+        if isinstance(msg, (UserMessage,)):
+            sanitized.append(msg)
+            i += 1
+            continue
+
+        if isinstance(msg, AssistantMessage) and msg.is_tool_call():
+            # Collect the N ToolMessages that follow this AssistantMessage
+            n_calls = len(msg.tool_calls)
+            tool_msgs = messages[i + 1 : i + 1 + n_calls]
+
+            # Verify they are actually ToolMessages (defensive)
+            if not all(isinstance(tm, ToolMessage) for tm in tool_msgs):
+                # Malformed — pass through as-is and let evaluator handle it
+                sanitized.append(msg)
+                i += 1
+                continue
+
+            # Separate successful and failed calls
+            good_calls = []
+            good_tool_msgs = []
+            for tc, tm in zip(msg.tool_calls, tool_msgs):
+                if not tm.error:
+                    good_calls.append(tc)
+                    good_tool_msgs.append(tm)
+
+            if good_calls:
+                # Rebuild AssistantMessage with only successful tool calls
+                clean_msg = deepcopy(msg)
+                clean_msg.tool_calls = good_calls
+                sanitized.append(clean_msg)
+                sanitized.extend(good_tool_msgs)
+            # If ALL calls failed, skip the entire AssistantMessage + ToolMessages
+            # (no DB state change occurred, evaluator doesn't need them)
+
+            i += 1 + n_calls
+            continue
+
+        if isinstance(msg, AssistantMessage) and not msg.is_tool_call():
+            sanitized.append(msg)
+            i += 1
+            continue
+
+        if isinstance(msg, ToolMessage):
+            # Orphan ToolMessage (shouldn't happen if history is well-formed)
+            sanitized.append(msg)
+            i += 1
+            continue
+
+        # Unknown message type — pass through
+        sanitized.append(msg)
+        i += 1
+
+    return sanitized
+
+
 def compute_task_success_reward(
     env_constructor: Callable,
     task: Any,
@@ -382,6 +461,9 @@ def compute_task_success_reward(
 
     Runs the full tau2-bench evaluator (DB state, action match, communicate checks)
     against the completed conversation trajectory.
+
+    M1 fix: sanitizes the trajectory to remove error tool calls before evaluation,
+    preventing non-deterministic error message replay failures.
 
     Args:
         env_constructor: tau2-bench environment factory (from registry)
@@ -399,6 +481,9 @@ def compute_task_success_reward(
         from tau2.evaluator.evaluator import evaluate_simulation, EvaluationType
         from tau2.utils.utils import get_now
 
+        # M1 fix: remove error tool calls to prevent replay mismatches
+        clean_trajectory = _sanitize_trajectory_for_evaluator(message_history)
+
         now = get_now()
         sim = SimulationRun(
             id=str(uuid4()),
@@ -407,7 +492,7 @@ def compute_task_success_reward(
             end_time=now,
             duration=0.0,
             termination_reason=termination_reason,
-            messages=message_history,
+            messages=clean_trajectory,
         )
         reward_info = evaluate_simulation(
             simulation=sim,
@@ -416,17 +501,21 @@ def compute_task_success_reward(
             solo_mode=False,
             domain=domain,
         )
+        n_errors_stripped = len(message_history) - len(clean_trajectory)
         diagnostics = {
             "task_success_reward": reward_info.reward,
             "reward_breakdown": {
                 k.value: v for k, v in (reward_info.reward_breakdown or {}).items()
             },
             "db_match": reward_info.db_check.db_match if reward_info.db_check else None,
+            "n_error_messages_stripped": n_errors_stripped,
         }
         return float(reward_info.reward), diagnostics
     except Exception as e:
+        import traceback
         print(f"[Tau2Solver] Warning: task_success evaluation failed: {e}")
-        return 0.0, {"task_success_error": str(e)}
+        print(f"[Tau2Solver] Traceback: {traceback.format_exc()}")
+        return 0.0, {"task_success_error": str(e), "task_id": getattr(task, 'id', '?')}
 
 
 def compute_combined_reward(
@@ -504,9 +593,9 @@ def compute_synthetic_reward(
     termination_reason: Any,
     tool_calls_made: List[Dict[str, Any]],
     expected_actions: Optional[List[Dict[str, Any]]] = None,
-    completion_coef: float = 0.4,
-    tool_usage_coef: float = 0.1,
-    action_match_coef: float = 0.5,
+    completion_coef: float = 0.5,
+    tool_usage_coef: float = 0.2,
+    action_match_coef: float = 0.3,
 ) -> Tuple[float, Dict]:
     """Reward for solver trained on challenger-generated scenarios.
 
@@ -516,15 +605,22 @@ def compute_synthetic_reward(
       R_completion (0.0-1.0): did the user simulator signal task completion?
         - USER_STOP  → 1.0  (user satisfied)
         - AGENT_STOP → 0.5  (agent ended; partial credit)
-        - timeout    → 0.0  (no resolution)
+        - MAX_STEPS  → 0.1  (made progress but timed out)
+        - other      → 0.0  (no resolution)
       R_tool_usage (0.0-1.0): did the agent make successful API calls?
         - min(1.0, n_successful_calls / 2)
-      R_action_match (0.0-1.0): how well do solver's tool calls match
-        the challenger's expected actions? Uses the same greedy F1 scoring
-        as the standard solver reward.
+      R_action_match (0.0-1.0): full greedy matching (name + arg keys + arg values)
+        between solver's tool calls and challenger's expected actions.
+        The challenger sees real DB context when generating expected actions,
+        so argument values are grounded in actual entities (user_ids,
+        reservation_ids, etc.), not random guesses.
 
-    When expected_actions is empty (legacy scenarios without actions),
-    falls back to completion + tool_usage only.
+    Weights: completion is primary (0.5) — user satisfaction is what we
+    optimize for. Action match is a shaping signal (0.3) that provides
+    denser feedback early in training. Tool usage (0.2) encourages the
+    agent to actually use tools rather than just chatting.
+
+    When expected_actions is empty, falls back to completion + tool_usage only.
 
     Returns:
         (reward ∈ [0, 1], diagnostics dict)
@@ -536,6 +632,8 @@ def compute_synthetic_reward(
         r_completion = 1.0
     elif termination_reason == TerminationReason.AGENT_STOP:
         r_completion = 0.5
+    elif termination_reason == TerminationReason.MAX_STEPS:
+        r_completion = 0.1
     else:
         r_completion = 0.0
 
@@ -543,11 +641,10 @@ def compute_synthetic_reward(
     n_calls = len(tool_calls_made)
     r_tool = min(1.0, n_calls / 2.0)
 
-    # --- R_action_match: compare with challenger's expected actions ---
+    # --- R_action_match: full greedy matching (name + args) ---
     r_action = 0.0
     action_diagnostics = {}
     if expected_actions and len(expected_actions) > 0:
-        # Normalize expected actions to the same format as tool_calls_made
         gt_calls = []
         for a in expected_actions:
             if isinstance(a, dict) and "name" in a:
@@ -560,7 +657,7 @@ def compute_synthetic_reward(
                 predicted_calls=tool_calls_made,
                 ground_truth_calls=gt_calls,
             )
-        # With action matching available, use full 3-component weighting
+
         combined = (
             completion_coef * r_completion
             + tool_usage_coef * r_tool

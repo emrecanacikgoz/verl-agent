@@ -600,10 +600,21 @@ class AppWorldEnvironmentManager(EnvironmentManagerBase):
         return postprocess_text_obs
 
 class Tau2BenchSolverEnvironmentManager(EnvironmentManagerBase):
-    """Environment manager for tau2-bench solver (multi-turn tool-calling agent)."""
+    """Environment manager for tau2-bench solver (multi-turn tool-calling agent).
+
+    Fixes vs. original:
+      - System prompt cached once per reset (not rebuilt every turn)
+      - Full policy text (no truncation)
+      - Compact tool signatures (not full JSON schemas)
+      - History entries stripped of <think> tags and truncated
+    """
+
+    # Maximum chars for a single history entry (action or observation)
+    _HIST_ENTRY_MAX_CHARS = 600
 
     def __init__(self, envs, projection_f, config):
         self.memory = SimpleMemory()
+        self._system_prompts: List[str] = []  # cached per-worker
         super().__init__(envs, projection_f, config)
 
     def reset(self, kwargs) -> Tuple[Dict[str, Any], List[Dict]]:
@@ -611,8 +622,8 @@ class Tau2BenchSolverEnvironmentManager(EnvironmentManagerBase):
         self.tasks = obs  # first user messages
         self.memory.reset(batch_size=len(obs))
 
-        # Build system prompt info from first worker's domain info
-        self._build_system_info(infos)
+        # Cache system prompts from worker state (full policy, compact tools)
+        self._cache_system_prompts()
 
         observations = {
             "text": self.build_text_obs(obs, init=True),
@@ -621,10 +632,48 @@ class Tau2BenchSolverEnvironmentManager(EnvironmentManagerBase):
         }
         return observations, infos
 
-    def _build_system_info(self, infos):
-        """Cache system prompt components from worker info."""
-        # These are available from the worker infos on first reset
-        self.domains = [info.get("domain", "unknown") for info in infos]
+    def _cache_system_prompts(self):
+        """Build and cache per-worker system prompts with full policy and compact tool signatures."""
+        workers = self.envs.workers if hasattr(self.envs, 'workers') else []
+        self._system_prompts = []
+        for i in range(len(workers)):
+            w = workers[i]
+            if w.policy:
+                # Compact tool signatures: "- tool_name(param1, param2) — description"
+                tool_lines = []
+                for schema in w.tool_schemas[:20]:
+                    name = schema.get("function", {}).get("name", schema.get("name", "?"))
+                    desc = schema.get("function", {}).get("description", schema.get("description", ""))[:120]
+                    params = schema.get("function", {}).get("parameters", {}).get("properties", {})
+                    if not params:
+                        # Fallback for flat schemas
+                        params = schema.get("parameters", {}).get("properties", {})
+                    param_str = ", ".join(params.keys()) if params else ""
+                    tool_lines.append(f"- {name}({param_str}) — {desc}")
+                tool_sigs = "\n".join(tool_lines)
+
+                system_prompt = TAU2BENCH_SOLVER_SYSTEM.format(
+                    domain=getattr(w, 'domain', 'unknown'),
+                    policy=w.policy,  # FULL policy, no truncation
+                    tool_signatures=tool_sigs,
+                )
+            else:
+                system_prompt = TAU2BENCH_SOLVER_SYSTEM.format(
+                    domain='unknown', policy='N/A', tool_signatures='(none)',
+                )
+            self._system_prompts.append(system_prompt)
+
+    @staticmethod
+    def _strip_think(text: str) -> str:
+        """Remove <think>...</think> blocks from agent output."""
+        import re
+        return re.sub(r"<think>.*?</think>", "", text, flags=re.DOTALL | re.IGNORECASE).strip()
+
+    @staticmethod
+    def _truncate(text: str, max_chars: int) -> str:
+        if len(text) <= max_chars:
+            return text
+        return text[:max_chars] + "..."
 
     def step(self, text_actions: List[str]):
         # Parse actions using projection
@@ -633,10 +682,18 @@ class Tau2BenchSolverEnvironmentManager(EnvironmentManagerBase):
         # Step environments with parsed actions
         next_obs, rewards, dones, infos = self.envs.step(parsed_actions)
 
-        # Store in memory
+        # Store COMPACT history entries: strip <think> from actions, truncate observations
+        compact_actions = [
+            self._truncate(self._strip_think(a), self._HIST_ENTRY_MAX_CHARS)
+            for a in text_actions
+        ]
+        compact_obs = [
+            self._truncate(o, self._HIST_ENTRY_MAX_CHARS)
+            for o in next_obs
+        ]
         self.memory.store({
-            "action": text_actions,
-            "observation": next_obs,
+            "action": compact_actions,
+            "observation": compact_obs,
         })
 
         next_observations = {
@@ -668,21 +725,13 @@ class Tau2BenchSolverEnvironmentManager(EnvironmentManagerBase):
                 action_key="action",
             )
 
-        # Get solver system prompt components from env workers
-        workers = self.envs.workers if hasattr(self.envs, 'workers') else []
-
         for i in range(len(text_obs)):
-            # Build system prompt with policy and tools
-            if workers and i < len(workers) and workers[i].policy:
-                import json as _json
-                system_prompt = TAU2BENCH_SOLVER_SYSTEM.format(
-                    domain=workers[i].domain if hasattr(workers[i], 'domain') else 'unknown',
-                    policy=workers[i].policy[:2000],  # Truncate long policies
-                    tool_schemas=_json.dumps(workers[i].tool_schemas[:20], indent=1)[:3000],
-                )
+            # Use cached system prompt (full policy, compact tools)
+            if i < len(self._system_prompts):
+                system_prompt = self._system_prompts[i]
             else:
                 system_prompt = TAU2BENCH_SOLVER_SYSTEM.format(
-                    domain='unknown', policy='N/A', tool_schemas='[]'
+                    domain='unknown', policy='N/A', tool_signatures='(none)',
                 )
 
             if init or self.config.env.history_length <= 0:
@@ -694,7 +743,6 @@ class Tau2BenchSolverEnvironmentManager(EnvironmentManagerBase):
                 obs_i = TAU2BENCH_SOLVER_TEMPLATE.format(
                     system_prompt=system_prompt,
                     step_count=len(self.memory[i]),
-                    history_length=valid_lens[i],
                     action_history=memory_ctx[i],
                     current_observation=text_obs[i],
                 )
@@ -873,8 +921,12 @@ def make_envs(config):
         task_success_reward_coef = getattr(tau2_cfg, "task_success_reward_coef", 0.5)
         # TOD-Zero: optional path to challenger-generated user goals
         challenger_scenarios_path = getattr(tau2_cfg, "challenger_scenarios_path", None)
+        # M3 fix: Hydra may pass the string "null" instead of Python None
+        if challenger_scenarios_path in (None, "null", "None", ""):
+            challenger_scenarios_path = None
         # Conversation logging for debugging (set env.tau2bench.conv_log_dir to enable)
         conv_log_dir = getattr(tau2_cfg, "conv_log_dir", None)
+        max_steps = config.env.max_steps
         _envs = build_tau2bench_solver_envs(
             domain=tau2_cfg.domain,
             user_sim_url=tau2_cfg.user_sim_url,
@@ -887,6 +939,8 @@ def make_envs(config):
             task_success_reward_coef=task_success_reward_coef,
             challenger_scenarios_path=challenger_scenarios_path,
             conv_log_dir=conv_log_dir,
+            task_split="train",  # C1 fix: train split for training
+            max_steps=max_steps,
         )
         _val_envs = build_tau2bench_solver_envs(
             domain=tau2_cfg.domain,
@@ -900,6 +954,8 @@ def make_envs(config):
             task_success_reward_coef=task_success_reward_coef,
             # val always uses registry tasks for clean evaluation
             conv_log_dir=conv_log_dir,
+            task_split="test",  # C4 fix: test split for validation
+            max_steps=max_steps,
         )
         projection_f = partial(solver_projection)
         envs = Tau2BenchSolverEnvironmentManager(_envs, projection_f, config)

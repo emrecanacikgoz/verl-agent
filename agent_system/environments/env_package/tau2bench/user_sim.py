@@ -7,26 +7,43 @@ user responses. The user simulator is FIXED (no training) throughout.
 
 import json
 import time
+from pathlib import Path
 from typing import Any, Dict, List, Optional
 
 
-# Default system prompt template for user simulation
-# NOTE: Stop tokens MUST match tau2-bench convention (###STOP###, ###TRANSFER###,
-# ###OUT-OF-SCOPE###) so that the tau2 evaluator and orchestrator recognise them
-# during both RL training *and* final evaluation via `tau2 run`.
-USER_SIM_SYSTEM_PROMPT = """You are simulating a customer who is contacting customer service.
-You must follow the scenario below and act as this customer would.
+# Path to tau2-bench's official simulation guidelines
+_TAU2_DATA_DIR = Path(__file__).parent.parent.parent.parent.parent / "tau2-bench" / "data" / "tau2" / "user_simulator"
 
-IMPORTANT RULES:
-- Stay in character and follow the scenario instructions precisely
-- Respond naturally as a real customer would
-- Only reveal information that the scenario says you know
-- Do not reveal information the scenario says is unknown to you
-- If the agent has fully resolved your issue, respond with exactly: ###STOP###
-- If you are being transferred to another department, respond with: ###TRANSFER###
-- If the agent says your request is out of scope, respond with: ###OUT-OF-SCOPE###
-- Keep responses concise and natural (1-3 sentences typically)
-- Do not make up information not in the scenario
+
+def _load_tau2_guidelines(use_tools: bool = False) -> str:
+    """Load official tau2-bench user simulator guidelines.
+
+    Falls back to a built-in version if the file is not found.
+    """
+    fname = "simulation_guidelines_tools.md" if use_tools else "simulation_guidelines.md"
+    path = _TAU2_DATA_DIR / fname
+    if path.exists():
+        with open(path) as f:
+            return f.read()
+    # Fallback: minimal guidelines matching tau2-bench conventions
+    return """# User Simulation Guidelines
+You are playing the role of a customer contacting a customer service representative.
+Your goal is to simulate realistic customer interactions while following specific scenario instructions.
+
+## Core Principles
+- Generate one message at a time, maintaining natural conversation flow.
+- Strictly follow the scenario instructions you have received.
+- Never make up or hallucinate information not provided in the scenario instructions.
+- Disclose information progressively. Wait for the agent to ask for specific information before providing it.
+
+## Task Completion
+- If the instruction goal is satisfied, generate the '###STOP###' token to end the conversation.
+- If you are transferred to another agent, generate the '###TRANSFER###' token.
+- If the scenario does not provide enough information, generate the '###OUT-OF-SCOPE###' token."""
+
+
+# System prompt template — uses tau2-bench's official guidelines
+USER_SIM_SYSTEM_PROMPT = """{guidelines}
 
 <scenario>
 {instructions}
@@ -48,10 +65,16 @@ def check_user_sim_connection(api_url: str, timeout: float = 10.0) -> bool:
 
 
 class LightUserSimulator:
-    """Lightweight user simulator using an external OpenAI-compatible API."""
+    """Lightweight user simulator using an external OpenAI-compatible API.
+
+    Uses tau2-bench's official simulation guidelines for consistent behavior
+    between RL training and final evaluation via `tau2 run`.
+    """
 
     # Class-level cache: api_url -> resolved model name (avoids per-instance API calls + log spam)
     _resolved_model_cache: Dict[str, str] = {}
+    # Class-level cache: loaded guidelines text (same for all instances)
+    _guidelines_cache: Dict[bool, str] = {}
 
     def __init__(
         self,
@@ -60,13 +83,21 @@ class LightUserSimulator:
         user_instructions: str,
         temperature: float = 0.7,
         max_tokens: int = 256,
+        use_tools: bool = False,
     ):
         self.api_url = api_url
         self.model = model
         self.temperature = temperature
         self.max_tokens = max_tokens
+        self.use_tools = use_tools
+
+        # Load guidelines once per use_tools setting
+        if use_tools not in LightUserSimulator._guidelines_cache:
+            LightUserSimulator._guidelines_cache[use_tools] = _load_tau2_guidelines(use_tools)
+        self._guidelines = LightUserSimulator._guidelines_cache[use_tools]
 
         self.system_prompt = USER_SIM_SYSTEM_PROMPT.format(
+            guidelines=self._guidelines,
             instructions=user_instructions,
         )
 
@@ -115,6 +146,7 @@ class LightUserSimulator:
     def reset(self, user_instructions: str):
         """Reset with new instructions."""
         self.system_prompt = USER_SIM_SYSTEM_PROMPT.format(
+            guidelines=self._guidelines,
             instructions=user_instructions,
         )
         self.history = []
