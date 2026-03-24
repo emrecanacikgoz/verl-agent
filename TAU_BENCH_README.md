@@ -61,8 +61,8 @@ For each iteration i = 1..N:
   │  Step 1: Train Challenger_i                                 │
   │                                                             │
   │  Input:  Domain policy + API schemas                        │
-  │  Output: <user_goal> natural language customer goals        │
-  │  Reward: format quality + domain relevance + action verbs   │
+  │  Output: <instructions> + <actions> (user scenario + expected tool calls) │
+  │  Reward: format validity + tool name validity + arg key validity │
   └────────────────────────┬────────────────────────────────────┘
                            │
                            ▼ (generate_challenger_scenarios.py)
@@ -80,8 +80,8 @@ For each iteration i = 1..N:
   │  customer        │           │  <response>...</response>    │
   └──────────────────┘           │                              │
            │                     │  Reward:                     │
-           │ [STOP] = success     │  0.7 × user satisfaction    │
-           └─────────────────────│  0.3 × tool usage           │
+           │ [STOP] = success     │  0.5 × user satisfaction    │
+           └─────────────────────│  0.2 × tool usage + 0.3 × action match           │
                                  └──────────────────────────────┘
                                            │
                                  ┌─────────▼──────────────────┐
@@ -398,37 +398,45 @@ task_success_reward = tau2-bench native evaluator
 Used when training with `challenger_scenarios_path`. No ground-truth eval criteria needed.
 
 ```
-reward = 0.7 × completion_reward + 0.3 × tool_usage_reward
+IF expected_actions available (from challenger):
+    reward = 0.5 × completion + 0.2 × tool_usage + 0.3 × action_match
+
+ELSE (no expected actions):
+    reward = 0.7 × completion + 0.3 × tool_usage
 
 completion_reward:
-    1.0  if user simulator signals [STOP]  (customer satisfied)
-    0.5  if agent signals stop             (partial credit)
-    0.0  if episode times out              (no resolution)
+    1.0  if user simulator signals ###STOP###  (customer satisfied)
+    0.5  if agent signals stop                 (partial credit)
+    0.1  if episode hits max_steps             (made progress but timed out)
+    0.0  otherwise                             (no resolution)
 
 tool_usage_reward:
     min(1.0, n_successful_tool_calls / 2)
     (reward for making at least 2 successful API calls)
+
+action_match_reward:
+    Greedy matching of solver's tool calls vs challenger's expected actions.
+    Scores name match (0.2), argument key F1 (0.3), argument value match (0.5).
+    Challenger arguments are grounded in real DB context, so this is a
+    meaningful signal, not a random guess.
 ```
 
-### Challenger — User Goal Quality
+### Challenger — Scenario Quality
 
 ```
-reward = R_format + R_length + R_quality  (capped at 1.0)
+reward = 0.4 × R_format + 0.3 × R_tool_validity + 0.3 × R_arg_validity
 
-R_format (0.0–0.4):
-    0.4 if <user_goal> tag present with ≥50 chars
-    0.25 if present with ≥20 chars
-    0.0 otherwise
+R_format (0.0–1.0):
+    +0.25  <instructions> tag present and non-empty
+    +0.25  instructions length ≥ 20 chars
+    +0.25  <actions> tag parses as JSON list with ≥1 item
+    +0.25  every action has "name" (str) and "arguments" (dict)
 
-R_length (0.0–0.3):
-    0.30 if 50–400 chars   (specific, not verbose)
-    0.15 if 20–50 chars    (too brief)
-    0.15 if >400 chars     (too verbose)
+R_tool_validity (0.0–1.0):
+    Fraction of action names that exist in the domain's tool set
 
-R_quality (0.0–0.3):
-    +0.15 if contains action verbs (cancel, book, change, refund, ...)
-    +0.15 if goal concepts overlap with available tool names
-    +0.15 if mentions domain-relevant keywords (from policy)
+R_arg_validity (0.0–1.0):
+    Fraction of valid argument keys per action (matched against tool schema)
 ```
 
 ---
@@ -545,13 +553,14 @@ env.rollout.n=4
 ### Challenger generates poor scenarios
 - Increase `CHALLENGER_EPOCHS` (more training time)
 - Check W&B for `challenger_success_rate` — should climb above 0.5
-- Verify the model is following the `<user_goal>` format in completions
+- Verify the model is following `<instructions>...</instructions>` and `<actions>[...]</actions>` format
 
 ### Solver reward is always 0 in TOD-Zero mode
 - Verify user simulator is running: `curl http://localhost:8000/health`
 - Check `user_sim_server.log` for errors
-- Ensure `CHALLENGER_SCENARIOS_PATH` points to a valid JSON file with `"goal"` fields
-- Lower `env.tau2bench.challenger_scenarios_path` and verify it loads: look for `Loaded N challenger scenarios` in training logs
+- Ensure `CHALLENGER_SCENARIOS_PATH` points to a valid JSON file with `"instructions"` and `"actions"` fields
+- Verify scenarios loaded: look for `Loaded N challenger scenarios` in training logs
+- Check conv_logs (if enabled) for conversation traces to diagnose agent behavior
 
 ### Import errors
 ```bash

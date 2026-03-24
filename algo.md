@@ -28,7 +28,7 @@ Each iteration performs four sequential steps. The output of each step feeds int
 │  ┌──────────────────┐    ┌──────────────────┐    ┌──────────────────────┐  │
 │  │ Step 1            │    │ Step 2            │    │ Step 3               │  │
 │  │ TRAIN CHALLENGER  │───→│ GENERATE SCENARIOS│───→│ TRAIN SOLVER         │  │
-│  │ (GRPO, 8 GPUs)    │    │ (vLLM offline)    │    │ (GRPO, 7 GPUs)       │  │
+│  │ (GRPO, 4 GPUs)    │    │ (vLLM offline)    │    │ (GRPO, 3 GPUs)       │  │
 │  └──────────────────┘    └──────────────────┘    └──────────────────────┘  │
 │         │                        │                        │                 │
 │         ▼                        ▼                        ▼                 │
@@ -38,7 +38,7 @@ Each iteration performs four sequential steps. The output of each step feeds int
 │  Inputs:                  Inputs:                  Inputs:                  │
 │  • prev challenger ckpt   • trained challenger     • prev solver ckpt       │
 │  • tau2 DB + policy       • tau2 DB + policy       • scenarios.json         │
-│  • tool schemas           • tool schemas           • user sim (vLLM, GPU 7) │
+│  • tool schemas           • tool schemas           • user sim (vLLM, GPU 3) │
 │                                                    • tau2 environment       │
 └─────────────────────────────────────────────────────────────────────────────┘
                               │
@@ -199,7 +199,7 @@ compute_challenger_reward()                ← rewards.py (compute_challenger_re
 Trained Challenger (HF model)
     │
     ▼
-Load into vLLM (TP=4, all 8 GPUs)
+Load into vLLM (TP=2, 4 GPUs)
     │
     ▼
 For each batch:
@@ -329,11 +329,11 @@ The `Tau2BenchSolverEnvironmentManager.build_text_obs()` constructs the full pro
 │  domain.                                                      │
 │                                                               │
 │  ## Policy                                                    │ ← worker.policy (from env.get_policy())
-│  <policy.md text, truncated to 2000 chars>                    │   Source: tau2-bench/data/tau2/domains/{domain}/policy.md
+│  <full policy.md text>                                        │   Source: tau2-bench/data/tau2/domains/{domain}/policy.md
 │                                                               │
-│  ## Available Tools                                           │ ← worker.tool_schemas (from env.get_tools())
-│  [{"name": "get_user_details", "type": "function", ...},     │   Source: tau2 environment tool registry
-│   {"name": "cancel_reservation", ...},                        │   Truncated to first 20 tools, 3000 chars
+│  ## Available Tools                                           │ ← compact tool signatures (from env.get_tools())
+│  - get_user_details(user_id) — Get user details by user id.   │   Built in _cache_system_prompts()
+│  - cancel_reservation(reservation_id) — Cancel reservation.   │   ~430 tokens (vs ~2000 for full JSON schemas)
 │   ...]                                                        │
 │                                                               │
 │  ## Output Format                                             │
@@ -355,10 +355,10 @@ The `Tau2BenchSolverEnvironmentManager.build_text_obs()` constructs the full pro
 
 | Prompt Component | Source | Code Location |
 |---|---|---|
-| `{domain}` | `env.tau2bench.domain` config | `env_manager.py:679` |
-| `{policy}` | `worker.policy` = `env.get_policy()` | `envs.py:136`, `env_manager.py:680` |
-| `{tool_schemas}` | `worker.tool_schemas` = `[t.openai_schema for t in env.get_tools()]` | `envs.py:135`, `env_manager.py:681` |
-| History | `SimpleMemory.fetch(history_length)` | `env_manager.py:665-669` |
+| `{domain}` | `env.tau2bench.domain` config | `env_manager.py` |
+| `{policy}` | `worker.policy` = `env.get_policy()` — **full text, no truncation** | `envs.py`, `env_manager.py:_cache_system_prompts()` |
+| `{tool_signatures}` | Compact `- name(params) — desc` format from `worker.tool_schemas` | `env_manager.py:_cache_system_prompts()` |
+| History | `SimpleMemory.fetch(history_length)` — `<think>` stripped, 600 char limit | `env_manager.py` |
 | Current observation | `text_obs[i]` from `envs.step()` return | `env_manager.py:698-700` |
 
 ### 4.4 Solver Output Parsing
@@ -458,12 +458,9 @@ _SolverWorker.step()                       ← envs.py:180
 │                                                          │
 │  System Prompt:                                          │
 │  ┌────────────────────────────────────────────────────┐  │
-│  │ You are simulating a customer...                   │  │
-│  │ IMPORTANT RULES:                                   │  │
-│  │ - Stay in character                                │  │
-│  │ - If resolved: ###STOP###                          │  │
-│  │ - If transferred: ###TRANSFER###                   │  │
-│  │ - If out of scope: ###OUT-OF-SCOPE###              │  │
+│  │ {tau2-bench simulation_guidelines.md}              │  │ ← loaded from tau2-bench/data/tau2/user_simulator/
+│  │ (Core Principles, Task Completion rules,           │  │
+│  │  ###STOP###, ###TRANSFER###, ###OUT-OF-SCOPE###)   │  │
 │  │                                                    │  │
 │  │ <scenario>                                         │  │
 │  │ {instructions from challenger/task}                │  │ ← THIS IS THE KEY INPUT
@@ -476,7 +473,7 @@ _SolverWorker.step()                       ← envs.py:180
 │  │ agent messages    → role: "user"                   │  │
 │  └────────────────────────────────────────────────────┘  │
 │                                                          │
-│  API: OpenAI-compatible (vLLM server on GPU 7)           │
+│  API: OpenAI-compatible (vLLM server on GPU 3)           │
 │  Model: env.tau2bench.user_sim_model                     │
 │  Temperature: 0.7                                        │
 │  Max tokens: 256                                         │
@@ -555,17 +552,17 @@ where:
 | Tool-call F1 | `compute_solver_accuracy()` | `rewards.py:176` | `predicted_calls`, `ground_truth_calls` (from `task.evaluation_criteria.actions`) | reward ∈ [0, 1] |
 | DB state check | `compute_task_success_reward()` | `rewards.py:374` | `env_constructor`, `task`, `message_history`, `domain`, `termination_reason` | reward ∈ {0, 1} |
 
-**DB state check details**: Replays all tool calls on a fresh environment, compares DB hash with gold environment that executed the expected actions. Binary match.
+**DB state check details**: Sanitizes trajectory (strips error tool calls), then replays all remaining tool calls on a fresh environment, compares DB hash with gold environment that executed the expected actions. Binary match.
 
 ### 5.2 Solver Reward — Synthetic Mode (TOD-Zero)
 
 **When**: `synthetic_mode = True` (using challenger-generated scenarios)
 
-**Function**: `compute_synthetic_reward()` in `rewards.py:503`
+**Function**: `compute_synthetic_reward()` in `rewards.py`
 
 ```
 IF expected_actions available (from challenger):
-    reward = 0.4 * r_completion + 0.1 * r_tool_usage + 0.5 * r_action_match
+    reward = 0.5 * r_completion + 0.2 * r_tool_usage + 0.3 * r_action_match
 
 ELSE (legacy, no expected actions):
     reward = 0.7 * r_completion + 0.3 * r_tool_usage
@@ -573,9 +570,9 @@ ELSE (legacy, no expected actions):
 
 | Component | Weight | Computation | Values |
 |---|---|---|---|
-| `r_completion` | 0.4 | `TerminationReason == USER_STOP` → 1.0, `AGENT_STOP` → 0.5, else → 0.0 | {0.0, 0.5, 1.0} |
-| `r_tool_usage` | 0.1 | `min(1.0, len(tool_calls_made) / 2.0)` | [0, 1] |
-| `r_action_match` | 0.5 | `compute_solver_accuracy(tool_calls_made, expected_actions)` | [0, 1] |
+| `r_completion` | 0.5 | `USER_STOP` → 1.0, `AGENT_STOP` → 0.5, `MAX_STEPS` → 0.1, else → 0.0 | {0.0, 0.1, 0.5, 1.0} |
+| `r_tool_usage` | 0.2 | `min(1.0, len(tool_calls_made) / 2.0)` | [0, 1] |
+| `r_action_match` | 0.3 | `compute_solver_accuracy(tool_calls_made, expected_actions)` — full greedy matching (name + arg keys + arg values) | [0, 1] |
 
 **Data flow for `expected_actions`**:
 ```
@@ -673,9 +670,9 @@ All templates are in `agent_system/environments/prompts/tau2bench.py`.
 
 | Template | Placeholders | Used When |
 |---|---|---|
-| `TAU2BENCH_SOLVER_SYSTEM` | `{domain}`, `{policy}`, `{tool_schemas}` | Always (system context) |
+| `TAU2BENCH_SOLVER_SYSTEM` | `{domain}`, `{policy}`, `{tool_signatures}` | Always (system context) |
 | `TAU2BENCH_SOLVER_TEMPLATE_NO_HIS` | `{system_prompt}`, `{current_observation}` | First step (no history) |
-| `TAU2BENCH_SOLVER_TEMPLATE` | `{system_prompt}`, `{step_count}`, `{history_length}`, `{action_history}`, `{current_observation}` | Subsequent steps |
+| `TAU2BENCH_SOLVER_TEMPLATE` | `{system_prompt}`, `{step_count}`, `{action_history}`, `{current_observation}` | Subsequent steps |
 
 ### 7.2 Challenger Templates
 
@@ -691,7 +688,7 @@ In `user_sim.py`:
 
 | Template | Placeholders | Used When |
 |---|---|---|
-| `USER_SIM_SYSTEM_PROMPT` | `{instructions}` | Every reset (from scenario or task) |
+| `USER_SIM_SYSTEM_PROMPT` | `{guidelines}`, `{instructions}` | Every reset (guidelines from tau2-bench, instructions from scenario or task) |
 
 ---
 
@@ -711,6 +708,7 @@ Use this list to verify correctness when debugging:
 - [ ] `ToolMessage.requestor` == "assistant" for agent tool calls
 - [ ] `tool_calls_made` list only contains **successful** tool calls (no errors)
 - [ ] `message_history` includes initial state messages from task (if standard mode)
+- [ ] Before evaluator replay, `_sanitize_trajectory_for_evaluator()` strips error tool calls
 
 ### Scenario Data Flow
 - [ ] `build_tau2bench_solver_envs` preserves full dict `{"instructions": str, "actions": list}` (not just instructions string)
@@ -721,13 +719,15 @@ Use this list to verify correctness when debugging:
 ### Prompt Construction
 - [ ] Solver gets `policy` from `worker.policy` (set in `_SolverWorker.reset()` from `env.get_policy()`)
 - [ ] Solver gets `tool_schemas` from `worker.tool_schemas` (set from `env.get_tools()`)
-- [ ] Policy is truncated to 2000 chars, tool_schemas to 3000 chars (see `env_manager.py:680-681`)
+- [ ] System prompt is built once per reset in `_cache_system_prompts()` — full policy, compact tool signatures
+- [ ] History entries have `<think>` tags stripped and are truncated to 600 chars
 - [ ] Challenger gets `context_text` from fresh `sample_context()` call on each reset
 
 ### Reward Computation
 - [ ] Standard mode: `compute_combined_reward()` uses `task.evaluation_criteria.actions` as ground truth
 - [ ] Synthetic mode: `compute_synthetic_reward()` uses `_expected_actions` from challenger JSON
 - [ ] API fail: reward=0, `TerminationReason.TOO_MANY_ERRORS`, no evaluator call
+- [ ] MAX_STEPS: `_compute_final_reward()` called with `TerminationReason.MAX_STEPS`, r_completion=0.1
 - [ ] `compute_solver_accuracy()` uses greedy matching (not 1:1), handles extra call penalty
 
 ### Environment State
