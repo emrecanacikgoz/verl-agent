@@ -7,6 +7,7 @@ Provides:
 """
 
 import json
+import re
 import concurrent.futures
 import asyncio
 from copy import deepcopy
@@ -369,10 +370,18 @@ class _SolverWorker:
         )
         from tau2.data_model.simulation import TerminationReason
 
-        # Record agent's text response
+        # Record agent's text response (full content for tau2 evaluator)
         self.message_history.append(TauAssistantMessage(role="assistant", content=content))
 
-        user_reply = self.user_sim.respond(content)
+        # Strip <think> blocks before sending to user sim — agent reasoning
+        # inflates user sim context (up to 2048 tokens/msg vs ~100 clean) and
+        # is not part of the customer-facing conversation.
+        clean_content = re.sub(r"<think>.*?</think>", "", content,
+                               flags=re.DOTALL | re.IGNORECASE).strip()
+        if not clean_content:
+            clean_content = "..."
+
+        user_reply = self.user_sim.respond(clean_content)
 
         # Record user's reply
         self.message_history.append(TauUserMessage(role="user", content=user_reply))

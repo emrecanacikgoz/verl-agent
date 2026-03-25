@@ -52,6 +52,13 @@ USER_SIM_SYSTEM_PROMPT = """{guidelines}
 # Number of consecutive failures before raising an error during training
 _MAX_CONSECUTIVE_FAILURES = 3
 
+# Maximum context-length retries before giving up (prevents infinite trim loops)
+_MAX_CONTEXT_RETRIES = 5
+
+# Proactive history token budget — trim before hitting the server's context limit.
+# Conservative: 32768 (typical vLLM context) minus ~4k system prompt minus ~4k buffer.
+_HISTORY_TOKEN_BUDGET = 24000
+
 
 def check_user_sim_connection(api_url: str, timeout: float = 10.0) -> bool:
     """Check if the user sim server is reachable. Returns True if healthy."""
@@ -228,12 +235,32 @@ class LightUserSimulator:
             return max(overshoot, 1)  # always positive so caller drops at least a few turns
         return None
 
+    def _trim_history_to_budget(self):
+        """Proactively trim oldest turns to stay within token budget.
+
+        Prevents context-length API errors by trimming before the call,
+        rather than reacting to failures. Drops oldest 2 messages at a time
+        (one user+assistant exchange) to maintain conversation coherence.
+        """
+        sys_tokens = len(self.system_prompt) // 4  # rough: 1 token ≈ 4 chars
+        history_tokens = sum(len(m["content"]) for m in self.history) // 4
+        budget = _HISTORY_TOKEN_BUDGET - sys_tokens
+        while history_tokens > budget and len(self.history) > 2:
+            self.history = self.history[2:]
+            history_tokens = sum(len(m["content"]) for m in self.history) // 4
+
     def respond(self, agent_message: str) -> str:
         """Generate user's response to the agent's message."""
         self.history.append({"role": "user", "content": agent_message})
 
+        # Proactively trim history to stay within token budget (Fix 3).
+        # This prevents most context-length errors before they happen.
+        self._trim_history_to_budget()
+
         # Try with progressively shorter history if we hit context length limits.
         history_view = list(self.history)
+        trimmed = False
+        context_retries = 0
         while True:
             messages = [{"role": "system", "content": self.system_prompt}] + history_view
             try:
@@ -245,6 +272,16 @@ class LightUserSimulator:
                 raise
             except Exception as e:
                 if self._is_context_length_error(e) and len(history_view) > 2:
+                    # Cap retries to prevent infinite trim loops (Fix 2b).
+                    context_retries += 1
+                    if context_retries > _MAX_CONTEXT_RETRIES:
+                        print(
+                            f"[UserSim] FATAL: {_MAX_CONTEXT_RETRIES} context-length "
+                            f"retries exhausted. Ending episode."
+                        )
+                        user_reply = "[API_FAIL]"
+                        break
+
                     # Reset the failure counter so context-length retries don't count.
                     self._consecutive_failures = 0
 
@@ -267,6 +304,7 @@ class LightUserSimulator:
                     # Don't drop more than we have (keep at least 2 turns)
                     turns_to_drop = min(turns_to_drop, len(history_view) - 2)
                     history_view = history_view[turns_to_drop:]
+                    trimmed = True
                     print(
                         f"[UserSim] Context too long (overshoot={overshoot}), "
                         f"dropped {turns_to_drop} turns. "
@@ -278,6 +316,11 @@ class LightUserSimulator:
                 # environment can assign 0 reward instead of USER_STOP reward.
                 user_reply = "[API_FAIL]"
                 break
+
+        # Persist trimming back to self.history so the next call starts from the
+        # already-trimmed baseline instead of re-failing from the full history (Fix 2a).
+        if trimmed:
+            self.history = history_view
 
         self.history.append({"role": "assistant", "content": user_reply})
         return user_reply
