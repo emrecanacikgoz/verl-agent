@@ -420,9 +420,11 @@ _SolverWorker.step()                       ← envs.py:180
     ├── type == "response"
     │   └── _handle_response(content)      ← envs.py:272
     │       │
-    │       ├── Record: message_history.append(AssistantMessage(content=content))
+    │       ├── Record: message_history.append(AssistantMessage(content=content))  ← FULL content for evaluator
     │       │
-    │       ├── Call user sim: user_reply = self.user_sim.respond(content)
+    │       ├── Strip <think> blocks from content (re.sub)    ← clean_content for user sim only
+    │       │
+    │       ├── Call user sim: user_reply = self.user_sim.respond(clean_content)
     │       │
     │       ├── Record: message_history.append(UserMessage(content=user_reply))
     │       │
@@ -722,6 +724,9 @@ Use this list to verify correctness when debugging:
 - [ ] System prompt is built once per reset in `_cache_system_prompts()` — full policy, compact tool signatures
 - [ ] History entries have `<think>` tags stripped and are truncated to 600 chars
 - [ ] Challenger gets `context_text` from fresh `sample_context()` call on each reset
+- [ ] `_handle_response()` strips `<think>` blocks before passing content to `user_sim.respond()`
+- [ ] `user_sim.respond()` proactively trims history to token budget before API call
+- [ ] `user_sim.respond()` persists trimmed history back to `self.history` after successful retry
 
 ### Reward Computation
 - [ ] Standard mode: `compute_combined_reward()` uses `task.evaluation_criteria.actions` as ground truth

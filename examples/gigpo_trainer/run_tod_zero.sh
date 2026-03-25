@@ -15,7 +15,7 @@
 #   DOMAIN=airline ITERATIONS=5 bash run_tod_zero.sh
 #
 # Requirements:
-#   - 4x GPUs: 3 for training, 1 for user sim
+#   - 8x GPUs: 7 for training, 1 for user sim
 #   - tau2-bench: pip install git+https://github.com/emrecanacikgoz/tau2-bench.git
 #   - verl-agent: pip install -e . (from repo root)
 #
@@ -43,13 +43,13 @@ SOLVER_EPOCHS=${SOLVER_EPOCHS:-100}
 # User simulator (fixed, not trained)
 USER_SIM_MODEL=${USER_SIM_MODEL:-"$BASE_MODEL"}
 USER_SIM_PORT=${USER_SIM_PORT:-8000}
-USER_SIM_GPU=${USER_SIM_GPU:-3}
+USER_SIM_GPU=${USER_SIM_GPU:-7}
 
 # GPU allocation — steps are sequential, so each step maximizes GPU usage:
-# Challenger training:   GPUs 0-3 (all 4, no user sim needed)
-# Scenario generation:   GPUs 0-3 (all 4, vLLM TP=4)
-# Solver training:       GPUs 0-2 (3 GPUs, rollout TP=1 so any count works)
-# User sim server:       GPU 3   (runs concurrently with solver training)
+# Challenger training:   GPUs 0-7 (all 8, no user sim needed)
+# Scenario generation:   GPUs 0-7 (all 8, vLLM TP=8)
+# Solver training:       GPUs 0-6 (7 GPUs, rollout TP=1 so any count works)
+# User sim server:       GPU 7   (runs concurrently with solver training)
 
 # Output directory
 BASE_DIR=${BASE_DIR:-"./tod_zero_${DOMAIN}"}
@@ -143,8 +143,8 @@ for (( ITER=1; ITER<=ITERATIONS; ITER++ )); do
     echo ""
     echo "[Iter ${ITER}] Step 1: Training Challenger (from: $CHALLENGER_PREV)..."
 
-    CUDA_VISIBLE_DEVICES=0,1,2,3 \
-    N_GPUS_PER_NODE=4 \
+    CUDA_VISIBLE_DEVICES=0,1,2,3,4,5,6,7 \
+    N_GPUS_PER_NODE=8 \
     MODEL=$CHALLENGER_PREV \
     DOMAIN=$DOMAIN \
     CHALLENGER_EPOCHS=$CHALLENGER_EPOCHS \
@@ -173,7 +173,7 @@ for (( ITER=1; ITER<=ITERATIONS; ITER++ )); do
     echo ""
     echo "[Iter ${ITER}] Step 2: Generating ${N_SCENARIOS} scenarios → ${SCENARIOS_FILE}"
 
-    CUDA_VISIBLE_DEVICES=0,1,2,3 \
+    CUDA_VISIBLE_DEVICES=0,1,2,3,4,5,6,7 \
     python "$SCRIPT_DIR/generate_challenger_scenarios.py" \
         --model "$CHALLENGER_HF_DIR" \
         --domain "$DOMAIN" \
@@ -182,7 +182,7 @@ for (( ITER=1; ITER<=ITERATIONS; ITER++ )); do
         --iter "$ITER" \
         --batch_size 64 \
         --temperature 0.7 \
-        --tensor_parallel_size 2
+        --tensor_parallel_size 4
 
     N_GENERATED=$(python -c "import json; d=json.load(open('${SCENARIOS_FILE}')); print(len(d))" 2>/dev/null || echo "?")
     echo "[Iter ${ITER}] Generated ${N_GENERATED} valid scenarios."
@@ -200,8 +200,8 @@ for (( ITER=1; ITER<=ITERATIONS; ITER++ )); do
     echo ""
     echo "[Iter ${ITER}] Step 4: Training Solver (from: $SOLVER_PREV)..."
 
-    CUDA_VISIBLE_DEVICES=0,1,2 \
-    N_GPUS_PER_NODE=3 \
+    CUDA_VISIBLE_DEVICES=0,1,2,3,4,5,6 \
+    N_GPUS_PER_NODE=7 \
     MODEL=$SOLVER_PREV \
     DOMAIN=$DOMAIN \
     SOLVER_EPOCHS=$SOLVER_EPOCHS \
@@ -258,12 +258,12 @@ echo "[eval] Starting solver vLLM server on port $EVAL_PORT..."
 pkill -f "vllm.entrypoints.openai.api_server.*--port ${EVAL_PORT}" 2>/dev/null || true
 sleep 2
 
-CUDA_VISIBLE_DEVICES=0 python -m vllm.entrypoints.openai.api_server \
+CUDA_VISIBLE_DEVICES=0,1,2,3 python -m vllm.entrypoints.openai.api_server \
     --model "$SOLVER_PREV" \
     --served-model-name solver_eval \
     --port "$EVAL_PORT" \
     --enforce-eager \
-    --tensor-parallel-size 1 > "${BASE_DIR}/eval_server.log" 2>&1 &
+    --tensor-parallel-size 4 > "${BASE_DIR}/eval_server.log" 2>&1 &
 
 echo "[eval] Waiting for solver server..."
 for i in $(seq 1 60); do
@@ -281,12 +281,12 @@ echo "[eval] Starting user sim server on port $EVAL_USER_SIM_PORT..."
 start_user_sim_eval() {
     pkill -f "vllm.entrypoints.openai.api_server.*--port ${EVAL_USER_SIM_PORT}" 2>/dev/null || true
     sleep 2
-    CUDA_VISIBLE_DEVICES=1 python -m vllm.entrypoints.openai.api_server \
+    CUDA_VISIBLE_DEVICES=4,5,6,7 python -m vllm.entrypoints.openai.api_server \
         --model "$EVAL_USER_SIM_MODEL" \
         --served-model-name eval_user_sim \
         --port "$EVAL_USER_SIM_PORT" \
         --enforce-eager \
-        --tensor-parallel-size 1 > "${BASE_DIR}/eval_user_sim.log" 2>&1 &
+        --tensor-parallel-size 4 > "${BASE_DIR}/eval_user_sim.log" 2>&1 &
     for i in $(seq 1 60); do
         if curl -s "http://localhost:${EVAL_USER_SIM_PORT}/health" > /dev/null 2>&1; then
             echo "[eval] User sim server ready!"

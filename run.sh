@@ -34,10 +34,10 @@ CHALLENGER_EPOCHS=${CHALLENGER_EPOCHS:-30}   # epochs to train the challenger
 SOLVER_EPOCHS=${SOLVER_EPOCHS:-50}           # epochs to train the solver
 
 # User simulator — fixed throughout, never trained
-# GPU 3 is reserved for user sim; solver uses GPUs 0-2
+# GPU 7 is reserved for user sim; solver uses GPUs 0-6
 USER_SIM_MODEL=${USER_SIM_MODEL:-"$BASE_MODEL"}
 USER_SIM_PORT=${USER_SIM_PORT:-8000}
-USER_SIM_GPU=3
+USER_SIM_GPU=7
 
 # W&B
 export WANDB_PROJECT=${WANDB_PROJECT:-"tod-zero-${DOMAIN}"}
